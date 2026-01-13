@@ -83,7 +83,7 @@ Options:
   --prd <path>                        Override PRD path
   --out <path>                        Override PRD output path (prd command)
   --progress <path>                   Override progress log path
-  --agent <codex|claude|droid>        Override agent runner
+  --agent <codex|claude|droid|opencode>  Override agent runner
 
 Notes:
 - Uses local .agents/ralph if present; otherwise uses bundled defaults.
@@ -193,15 +193,16 @@ async function runInstallSkills() {
   const { intro, outro, select, isCancel } = await import("@clack/prompts");
   intro("Ralph skills install");
 
-  const agent = await select({
-    message: "Which agent are you using?",
-    options: [
-      { value: "codex", label: "codex" },
-      { value: "claude", label: "claude" },
-      { value: "droid", label: "droid" },
-    ],
-    initialValue: agentOverride || "codex",
-  });
+    const agent = await select({
+      message: "Which agent are you using?",
+      options: [
+        { value: "codex", label: "codex" },
+        { value: "claude", label: "claude" },
+        { value: "droid", label: "droid" },
+        { value: "opencode", label: "opencode" },
+      ],
+      initialValue: agentOverride || "codex",
+    });
   if (isCancel(agent)) {
     outro("Cancelled.");
     process.exit(0);
@@ -230,9 +231,13 @@ async function runInstallSkills() {
         ? scope === "global"
           ? path.join(home, ".claude", "skills")
           : path.join(cwd, ".claude", "skills")
-        : scope === "global"
-          ? path.join(home, ".factory", "skills")
-          : path.join(cwd, ".factory", "skills");
+        : agent === "droid"
+          ? scope === "global"
+            ? path.join(home, ".factory", "skills")
+            : path.join(cwd, ".factory", "skills")
+          : scope === "global"
+            ? path.join(home, ".local", "share", "opencode", "skills")
+            : path.join(cwd, ".opencode", "skills");
 
   const skillsToInstall = ["commit", "dev-browser", "prd"];
   fs.mkdirSync(targetRoot, { recursive: true });
@@ -348,11 +353,13 @@ async function main() {
       codex: "codex exec --yolo --skip-git-repo-check -",
       claude: "claude -p --dangerously-skip-permissions \"$(cat {prompt})\"",
       droid: "droid exec --skip-permissions-unsafe -f {prompt}",
+      opencode: "opencode run \"$(cat {prompt})\"",
     };
     const interactiveDefaults = {
       codex: "codex --yolo {prompt}",
       claude: "claude --dangerously-skip-permissions {prompt}",
       droid: "droid --skip-permissions-unsafe {prompt}",
+      opencode: "opencode run \"{prompt}\"",
     };
     const agentsPath = path.join(templateDir, "agents.sh");
     if (!exists(agentsPath)) {
@@ -369,9 +376,11 @@ async function main() {
       'printf "AGENT_CODEX_CMD=%s\\n" "${AGENT_CODEX_CMD:-}"',
       'printf "AGENT_CLAUDE_CMD=%s\\n" "${AGENT_CLAUDE_CMD:-}"',
       'printf "AGENT_DROID_CMD=%s\\n" "${AGENT_DROID_CMD:-}"',
+      'printf "AGENT_OPENCODE_CMD=%s\\n" "${AGENT_OPENCODE_CMD:-}"',
       'printf "AGENT_CODEX_INTERACTIVE_CMD=%s\\n" "${AGENT_CODEX_INTERACTIVE_CMD:-}"',
       'printf "AGENT_CLAUDE_INTERACTIVE_CMD=%s\\n" "${AGENT_CLAUDE_INTERACTIVE_CMD:-}"',
       'printf "AGENT_DROID_INTERACTIVE_CMD=%s\\n" "${AGENT_DROID_INTERACTIVE_CMD:-}"',
+      'printf "AGENT_OPENCODE_INTERACTIVE_CMD=%s\\n" "${AGENT_OPENCODE_INTERACTIVE_CMD:-}"',
     ].join("; ");
     const result = spawnSync("bash", ["-lc", bashCmd], { encoding: "utf-8" });
     if (result.status !== 0) {
@@ -394,11 +403,13 @@ async function main() {
         codex: readVar("AGENT_CODEX_CMD") || defaults.codex,
         claude: readVar("AGENT_CLAUDE_CMD") || defaults.claude,
         droid: readVar("AGENT_DROID_CMD") || defaults.droid,
+        opencode: readVar("AGENT_OPENCODE_CMD") || defaults.opencode,
       },
       interactive: {
         codex: readVar("AGENT_CODEX_INTERACTIVE_CMD") || interactiveDefaults.codex,
         claude: readVar("AGENT_CLAUDE_INTERACTIVE_CMD") || interactiveDefaults.claude,
         droid: readVar("AGENT_DROID_INTERACTIVE_CMD") || interactiveDefaults.droid,
+        opencode: readVar("AGENT_OPENCODE_INTERACTIVE_CMD") || interactiveDefaults.opencode,
       },
       defaultAgent: readVar("DEFAULT_AGENT") || "codex",
     };
@@ -411,7 +422,7 @@ async function main() {
     const mapped = agentMap[agentOverride];
     if (!mapped) {
       console.error(`Unknown agent: ${agentOverride}`);
-      console.error("Valid values: codex, claude, droid");
+      console.error("Valid values: codex, claude, droid, opencode");
       process.exit(1);
     }
     process.env.AGENT_CMD = mapped;

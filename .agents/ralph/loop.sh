@@ -126,6 +126,9 @@ require_agent() {
       droid)
         echo "Install: curl -fsSL https://app.factory.ai/cli | sh"
         ;;
+      opencode)
+        echo "Install: curl -fsSL https://opencode.ai/install.sh | bash"
+        ;;
     esac
     echo "Then authenticate per the CLI's instructions."
     exit 1
@@ -150,12 +153,13 @@ run_agent_inline() {
   prompt_content="$(cat "$prompt_file")"
   local escaped
   escaped=$(printf "%s" "$prompt_content" | sed "s/'/'\\\\''/g")
-  if [[ "$PRD_AGENT_CMD" == *"{prompt}"* ]]; then
-    local cmd="${PRD_AGENT_CMD//\{prompt\}/'$escaped'}"
-    eval "$cmd"
+  local cmd="${PRD_AGENT_CMD:-$AGENT_CMD}"
+  if [[ "$cmd" == *"{prompt}"* ]]; then
+    cmd="${cmd//\{prompt\}/'$escaped'}"
   else
-    eval "$PRD_AGENT_CMD '$escaped'"
+    cmd="$cmd '$escaped'"
   fi
+  eval "$cmd"
 }
 
 MODE="build"
@@ -192,12 +196,12 @@ PROMPT_FILE="$PROMPT_BUILD"
 
 if [ "$MODE" = "prd" ]; then
   PRD_USE_INLINE=1
-  if [ -z "$PRD_AGENT_CMD" ]; then
+  if [ -z "${PRD_AGENT_CMD:-}" ]; then
     PRD_AGENT_CMD="$AGENT_CMD"
     PRD_USE_INLINE=0
   fi
   if [ "${RALPH_DRY_RUN:-}" != "1" ]; then
-    require_agent "$PRD_AGENT_CMD"
+    require_agent "${PRD_AGENT_CMD:-$AGENT_CMD}"
   fi
 
   if [[ "$PRD_PATH" == *.json ]]; then
