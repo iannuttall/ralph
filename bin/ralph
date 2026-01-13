@@ -27,6 +27,46 @@ function exists(p) {
   }
 }
 
+function readPackageMeta() {
+  try {
+    const pkgPath = path.join(repoRoot, "package.json");
+    const data = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+    return { name: data.name || "ralph", version: data.version || "0.0.0" };
+  } catch {
+    return { name: "ralph", version: "0.0.0" };
+  }
+}
+
+function compareVersions(a, b) {
+  const parse = (value) =>
+    String(value || "")
+      .split(".")
+      .map((part) => parseInt(part, 10))
+      .map((n) => (Number.isNaN(n) ? 0 : n));
+  const pa = parse(a);
+  const pb = parse(b);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i += 1) {
+    const da = pa[i] || 0;
+    const db = pb[i] || 0;
+    if (da > db) return 1;
+    if (da < db) return -1;
+  }
+  return 0;
+}
+
+function checkForUpdate() {
+  if (!process.stdout.isTTY || !process.stdin.isTTY) return null;
+  if (process.env.RALPH_SKIP_UPDATE_CHECK === "1") return null;
+  const { name, version } = readPackageMeta();
+  const result = spawnSync("npm", ["view", name, "version"], { encoding: "utf-8" });
+  if (result.status !== 0) return null;
+  const latest = String(result.stdout || "").trim();
+  if (!latest) return null;
+  if (compareVersions(latest, version) <= 0) return null;
+  return { name, current: version, latest };
+}
+
 function usage() {
   console.log(`ralph <command>
 
@@ -224,6 +264,27 @@ async function runInstallSkills() {
 }
 
 async function main() {
+  const updateInfo = checkForUpdate();
+  if (updateInfo) {
+    const { intro, confirm, outro, isCancel } = await import("@clack/prompts");
+    intro("Ralph update available");
+    const shouldUpdate = await confirm({
+      message: `Update ${updateInfo.name} from ${updateInfo.current} to ${updateInfo.latest}?`,
+      initialValue: true,
+    });
+    if (isCancel(shouldUpdate)) {
+      outro("Skipped update.");
+    } else if (shouldUpdate) {
+      outro("Updating...");
+      const result = spawnSync("npm", ["i", "-g", `${updateInfo.name}@latest`], {
+        stdio: "inherit",
+      });
+      process.exit(result.status ?? 1);
+    } else {
+      outro("Skipped update.");
+    }
+  }
+
   if (cmd === "install") {
     if (exists(localDir) && !installForce) {
       console.log(`.agents/ralph already exists at ${localDir}. Skipping templates.`);
