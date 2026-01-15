@@ -81,23 +81,13 @@ function slugify(text) {
 }
 
 function getRepoFromRemote(remoteName) {
-  // Get the remote URL using git
   const result = spawnSync("git", ["remote", "get-url", remoteName],
     { encoding: "utf-8", stdio: "pipe" });
   if (result.status !== 0) return null;
 
   const url = result.stdout.trim();
-  // Parse owner/repo from various GitHub URL formats:
-  // git@github.com:owner/repo.git
-  // https://github.com/owner/repo.git
-  // https://github.com/owner/repo
-  const sshMatch = url.match(/git@github\.com:([^/]+\/[^/]+?)(?:\.git)?$/);
-  if (sshMatch) return sshMatch[1];
-
-  const httpsMatch = url.match(/github\.com\/([^/]+\/[^/]+?)(?:\.git)?$/);
-  if (httpsMatch) return httpsMatch[1];
-
-  return null;
+  const match = url.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
+  return match?.[1] ?? null;
 }
 
 async function ghCliFlow() {
@@ -163,7 +153,7 @@ async function ghCliFlow() {
     required: false,
   });
 
-  if (isCancel(selected) || !selected || selected.length === 0) {
+  if (isCancel(selected) || !selected?.length) {
     return null;
   }
 
