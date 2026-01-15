@@ -12,4 +12,4 @@ AGENT_OPENCODE_INTERACTIVE_CMD="opencode --prompt {prompt}"
 # Uncomment to use server mode (faster, avoids cold boot):
 # AGENT_OPENCODE_CMD="opencode run --attach http://localhost:4096 \"\$(cat {prompt})\""
 # AGENT_OPENCODE_INTERACTIVE_CMD="opencode --prompt {prompt} --attach http://localhost:4096"
-DEFAULT_AGENT="claude"
+DEFAULT_AGENT="codex"
