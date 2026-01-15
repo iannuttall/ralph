@@ -67,6 +67,122 @@ function checkForUpdate() {
   return { name, current: version, latest };
 }
 
+function hasGhCli() {
+  const result = spawnSync("gh", ["--version"], { encoding: "utf-8", stdio: "pipe" });
+  return result.status === 0;
+}
+
+function slugify(text) {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 50);
+}
+
+function getRepoFromRemote(remoteName) {
+  // Get the remote URL using git
+  const result = spawnSync("git", ["remote", "get-url", remoteName],
+    { encoding: "utf-8", stdio: "pipe" });
+  if (result.status !== 0) return null;
+
+  const url = result.stdout.trim();
+  // Parse owner/repo from various GitHub URL formats:
+  // git@github.com:owner/repo.git
+  // https://github.com/owner/repo.git
+  // https://github.com/owner/repo
+  const sshMatch = url.match(/git@github\.com:([^/]+\/[^/]+?)(?:\.git)?$/);
+  if (sshMatch) return sshMatch[1];
+
+  const httpsMatch = url.match(/github\.com\/([^/]+\/[^/]+?)(?:\.git)?$/);
+  if (httpsMatch) return httpsMatch[1];
+
+  return null;
+}
+
+async function ghCliFlow() {
+  const { multiselect, spinner, isCancel } = await import("@clack/prompts");
+  const s = spinner();
+
+  s.start("Fetching issues from current repo...");
+
+  // Get repo name from origin remote (handles forks correctly)
+  let repoName = getRepoFromRemote("origin");
+
+  // Fallback to upstream if origin not found
+  if (!repoName) {
+    repoName = getRepoFromRemote("upstream");
+  }
+
+  if (!repoName) {
+    s.stop("Failed to determine repository");
+    console.log("Make sure you're in a git repo with a GitHub remote.");
+    return null;
+  }
+
+  // Fetch issues explicitly from the determined repo (origin/fork)
+  const issueResult = spawnSync("gh", [
+    "issue", "list",
+    "--repo", repoName,
+    "--state", "open",
+    "--limit", "50",
+    "--json", "number,title,body,labels,url"
+  ], { encoding: "utf-8", stdio: "pipe" });
+
+  if (issueResult.status !== 0) {
+    s.stop("Failed to fetch issues");
+    console.log("Make sure you're in a git repo with a GitHub remote.");
+    if (issueResult.stderr) {
+      console.log(issueResult.stderr.trim());
+    }
+    return null;
+  }
+
+  let issues;
+  try {
+    issues = JSON.parse(issueResult.stdout);
+  } catch {
+    s.stop("Failed to parse issues");
+    return null;
+  }
+
+  s.stop(`Found ${issues.length} open issues in ${repoName}`);
+
+  if (issues.length === 0) {
+    console.log("This repo has no open issues. Continuing with manual PRD creation...");
+    return null;
+  }
+
+  // Multi-select which issues to import
+  const selected = await multiselect({
+    message: "Select issues to import (space to select, enter to confirm):",
+    options: [
+      { value: "all", label: "All open issues" },
+      ...issues.map(i => ({ value: i.number, label: `#${i.number}: ${i.title}` })),
+    ],
+    required: false,
+  });
+
+  if (isCancel(selected) || !selected || selected.length === 0) {
+    return null;
+  }
+
+  const issuesToImport = selected.includes("all")
+    ? issues
+    : issues.filter(i => selected.includes(i.number));
+
+  return { repo: repoName, issues: issuesToImport };
+}
+
+function formatIssuesAsContext(issues) {
+  let md = "\n\n## Imported GitHub Issues\n\n";
+  for (const issue of issues) {
+    md += `### #${issue.number}: ${issue.title}\n\n`;
+    md += `${issue.body || "(no description)"}\n\n`;
+  }
+  return md;
+}
+
 function usage() {
   console.log(`ralph <command>
 
@@ -489,9 +605,87 @@ async function main() {
 
   if (cmd === "prd") {
     let request = args.slice(1).join(" ").trim();
+    let importedIssues = [];
+
     if (!request) {
-      const { intro, outro, text, isCancel } = await import("@clack/prompts");
+      const { intro, outro, text, select, isCancel } = await import("@clack/prompts");
       intro("Ralph PRD");
+
+      // Step 1: Ask if user wants to import tasks
+      const wantsImport = await select({
+        message: "Do you want to import tasks?",
+        options: [
+          { value: "no", label: "No" },
+          { value: "yes", label: "Yes" },
+        ],
+      });
+
+      if (isCancel(wantsImport)) {
+        outro("Cancelled.");
+        process.exit(0);
+      }
+
+      if (wantsImport === "yes") {
+        // Step 2: Select provider
+        const provider = await select({
+          message: "Select provider:",
+          options: [
+            { value: "github", label: "GitHub Issues" },
+          ],
+        });
+
+        if (isCancel(provider)) {
+          outro("Cancelled.");
+          process.exit(0);
+        }
+
+        if (provider === "github") {
+          if (!hasGhCli()) {
+            console.log("\nGitHub CLI (gh) not found.");
+            console.log("Install gh for GitHub import: brew install gh");
+            console.log("Continuing with manual PRD creation...\n");
+          } else {
+            const result = await ghCliFlow();
+            if (result && result.issues.length > 0) {
+              importedIssues = result.issues;
+              console.log(`\nImported ${result.issues.length} issue(s) from ${result.repo}\n`);
+            }
+          }
+        }
+      }
+
+      // If we have imported issues, generate a PRD for each one
+      if (importedIssues.length > 0) {
+        outro("Generating PRDs...");
+
+        const agentName = agentOverride || defaultAgent;
+        const prdAgent = agentInteractiveMap[agentName] || agentMap[agentName];
+
+        for (const issue of importedIssues) {
+          console.log(`\nGenerating PRD for #${issue.number}: ${issue.title}...`);
+
+          const issueRequest = `#${issue.number}: ${issue.title}`;
+          const context = issue.body ? `\n\n## Issue Description\n\n${issue.body}` : "";
+          const requestFile = path.join(os.tmpdir(), `ralph-prd-${Date.now()}.md`);
+          fs.writeFileSync(requestFile, `${issueRequest}${context}\n`);
+
+          // Set output path with slugified title
+          const slug = slugify(issue.title);
+          const outputPath = path.join(defaultPrdOutputPath(cwd), `${slug}.json`);
+          env.PRD_PATH = outputPath;
+
+          if (prdAgent) {
+            env.PRD_AGENT_CMD = prdAgent;
+          }
+
+          const prdArgs = ["prd", "--prompt", requestFile];
+          spawnSync(loopPath, prdArgs, { stdio: "inherit", env });
+        }
+
+        process.exit(0);
+      }
+
+      // No imported issues - prompt for manual description
       const response = await text({
         message: "Describe the feature you want a PRD for",
         placeholder: "Example: A lightweight uptime monitor with email alerts",
@@ -507,6 +701,7 @@ async function main() {
       }
       outro("Generating PRD...");
     }
+
     const requestFile = path.join(os.tmpdir(), `ralph-prd-${Date.now()}.md`);
     fs.writeFileSync(requestFile, `${request}\n`);
     const outputPath = prdOutPath || prdPath || defaultPrdOutputPath(cwd, request);
