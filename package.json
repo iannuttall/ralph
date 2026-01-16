@@ -6,7 +6,7 @@
     "ralph": "bin/ralph"
   },
   "scripts": {
-    "test": "node tests/cli-smoke.mjs && node tests/agent-loops.mjs",
+    "test": "node tests/cli-smoke.mjs && node tests/agent-loops.mjs && node tests/github-import.mjs",
     "test:real": "node tests/real-agents.mjs",
     "test:ping": "node tests/agent-ping.mjs"
   },
