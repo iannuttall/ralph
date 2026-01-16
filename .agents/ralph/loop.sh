@@ -6,6 +6,9 @@
 #   ./.agents/ralph/loop.sh prd "request"   # generate PRD via agent
 #   ./.agents/ralph/loop.sh 10              # build mode, 10 iterations
 #   ./.agents/ralph/loop.sh build 1 --no-commit
+#   ./.agents/ralph/loop.sh sign "text"     # add formatted sign to guardrails.md
+#   ./.agents/ralph/loop.sh sign ls         # list all current signs
+#   ./.agents/ralph/loop.sh sign --clear    # reset guardrails to defaults
 
 set -euo pipefail
 
@@ -40,6 +43,9 @@ DEFAULT_NO_COMMIT=false
 DEFAULT_STALE_SECONDS=0
 PRD_REQUEST_PATH=""
 PRD_INLINE=""
+SIGN_INLINE=""
+SIGN_CLEAR=false
+SIGN_LIST=false
 
 # Optional config overrides (simple shell vars)
 if [ -f "$CONFIG_FILE" ]; then
@@ -165,7 +171,7 @@ run_agent_inline() {
 MODE="build"
 while [ $# -gt 0 ]; do
   case "$1" in
-    build|prd)
+    build|prd|sign)
       MODE="$1"
       shift
       ;;
@@ -177,9 +183,30 @@ while [ $# -gt 0 ]; do
       NO_COMMIT=true
       shift
       ;;
+    --clear)
+      if [ "$MODE" = "sign" ]; then
+        SIGN_CLEAR=true
+        shift
+      else
+        echo "Unknown arg: $1"
+        exit 1
+      fi
+      ;;
+    ls)
+      if [ "$MODE" = "sign" ]; then
+        SIGN_LIST=true
+        shift
+      else
+        echo "Unknown arg: $1"
+        exit 1
+      fi
+      ;;
     *)
       if [ "$MODE" = "prd" ]; then
         PRD_INLINE="${PRD_INLINE:+$PRD_INLINE }$1"
+        shift
+      elif [ "$MODE" = "sign" ]; then
+        SIGN_INLINE="${SIGN_INLINE:+$SIGN_INLINE }$1"
         shift
       elif [[ "$1" =~ ^[0-9]+$ ]]; then
         MAX_ITERATIONS="$1"
@@ -263,6 +290,199 @@ if [ "$MODE" = "prd" ]; then
   exit 0
 fi
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Sign mode: Add runtime guidance to guardrails.md
+# ─────────────────────────────────────────────────────────────────────────────
+
+add_sign() {
+  local text="$1"
+  local timestamp
+  timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+  local tmp_prompt="$TMP_DIR/sign-prompt-$$.md"
+  local tmp_output="$TMP_DIR/sign-output-$$.md"
+
+  mkdir -p "$TMP_DIR"
+
+  # Create prompt for agent to format the sign
+  cat > "$tmp_prompt" <<EOF
+Format this operator guidance as a Sign for the Ralph guardrails file.
+
+Operator's input:
+$text
+
+Output ONLY a markdown Sign block in this exact format (no other text):
+
+### Sign: [Short descriptive title, 3-6 words]
+- **Trigger**: [When this applies, e.g., "Before running tests", "When implementing auth", or "Always apply"]
+- **Instruction**: [The full guidance, can be multi-line]
+- **Added**: $timestamp
+EOF
+
+  # Run agent to format
+  if run_agent "$tmp_prompt" > "$tmp_output" 2>&1; then
+    # Extract just the sign block (lines starting with ### Sign: through the Added: line)
+    local sign_content
+    sign_content=$(sed -n '/^### Sign:/,/^\- \*\*Added\*\*:/p' "$tmp_output")
+    if [ -z "$sign_content" ]; then
+      # Fallback: use entire output if no sign block found
+      sign_content=$(cat "$tmp_output")
+    fi
+    echo "" >> "$GUARDRAILS_PATH"
+    echo "$sign_content" >> "$GUARDRAILS_PATH"
+    echo "Sign added to $GUARDRAILS_PATH:"
+    echo "$sign_content"
+  else
+    echo "Agent formatting failed, using raw format"
+    cat >> "$GUARDRAILS_PATH" <<EOF
+
+### Sign: Operator Guidance
+- **Trigger**: Always apply
+- **Instruction**: $text
+- **Added**: $timestamp
+EOF
+    echo "Sign added (raw format)"
+  fi
+
+  rm -f "$tmp_prompt" "$tmp_output"
+}
+
+reset_guardrails() {
+  cat > "$GUARDRAILS_PATH" <<EOF
+# Guardrails (Signs)
+
+> Lessons learned from failures. Read before acting.
+
+## Core Signs
+
+### Sign: Read Before Writing
+- **Trigger**: Before modifying any file
+- **Instruction**: Read the file first
+- **Added after**: Core principle
+
+### Sign: Test Before Commit
+- **Trigger**: Before committing changes
+- **Instruction**: Run required tests and verify outputs
+- **Added after**: Core principle
+
+---
+
+## Learned Signs
+
+EOF
+  echo "Guardrails reset to defaults: $GUARDRAILS_PATH"
+}
+
+list_signs() {
+  if [ ! -f "$GUARDRAILS_PATH" ]; then
+    echo "No guardrails file found at $GUARDRAILS_PATH"
+    exit 1
+  fi
+
+  python3 - "$GUARDRAILS_PATH" <<'PY'
+import sys
+from pathlib import Path
+
+content = Path(sys.argv[1]).read_text()
+lines = content.split('\n')
+
+current_section = None
+signs = []
+current_sign = None
+
+for line in lines:
+    stripped = line.strip()
+
+    # Detect section headers
+    if stripped == "## Core Signs":
+        current_section = "core"
+        continue
+    elif stripped == "## Learned Signs":
+        current_section = "learned"
+        continue
+
+    # Detect sign headers
+    if stripped.startswith("### Sign:"):
+        if current_sign:
+            signs.append(current_sign)
+        title = stripped.replace("### Sign:", "").strip()
+        current_sign = {
+            "section": current_section or "unknown",
+            "title": title,
+            "trigger": "",
+            "instruction": "",
+        }
+        continue
+
+    # Parse sign fields
+    if current_sign:
+        if stripped.startswith("- **Trigger**:"):
+            current_sign["trigger"] = stripped.replace("- **Trigger**:", "").strip()
+        elif stripped.startswith("- **Instruction**:"):
+            current_sign["instruction"] = stripped.replace("- **Instruction**:", "").strip()
+
+# Don't forget the last sign
+if current_sign:
+    signs.append(current_sign)
+
+if not signs:
+    print("No signs found.")
+    sys.exit(0)
+
+# Group by section
+core_signs = [s for s in signs if s["section"] == "core"]
+learned_signs = [s for s in signs if s["section"] == "learned"]
+
+print("=" * 60)
+print("  SIGNS")
+print("=" * 60)
+
+if core_signs:
+    print("\n[CORE]")
+    for i, sign in enumerate(core_signs, 1):
+        print(f"  {i}. {sign['title']}")
+        if sign['trigger']:
+            print(f"     Trigger: {sign['trigger']}")
+
+if learned_signs:
+    print("\n[LEARNED]")
+    for i, sign in enumerate(learned_signs, 1):
+        print(f"  {i}. {sign['title']}")
+        if sign['trigger']:
+            print(f"     Trigger: {sign['trigger']}")
+
+print()
+print(f"Total: {len(core_signs)} core, {len(learned_signs)} learned")
+PY
+}
+
+if [ "$MODE" = "sign" ]; then
+  mkdir -p "$TMP_DIR"
+
+  if [ "$SIGN_LIST" = "true" ]; then
+    list_signs
+    exit 0
+  fi
+
+  if [ "$SIGN_CLEAR" = "true" ]; then
+    reset_guardrails
+    exit 0
+  fi
+
+  if [ -z "$SIGN_INLINE" ]; then
+    echo "Usage: $0 sign \"your guidance text\""
+    echo "       $0 sign ls"
+    echo "       $0 sign --clear"
+    exit 1
+  fi
+
+  if [ "${RALPH_DRY_RUN:-}" != "1" ]; then
+    require_agent
+  fi
+
+  add_sign "$SIGN_INLINE"
+  exit 0
+fi
+
 if [ "${RALPH_DRY_RUN:-}" != "1" ]; then
   require_agent
 fi
@@ -272,7 +492,7 @@ if [ ! -f "$PROMPT_FILE" ]; then
   exit 1
 fi
 
-if [ "$MODE" != "prd" ] && [ ! -f "$PRD_PATH" ]; then
+if [ "$MODE" != "prd" ] && [ "$MODE" != "sign" ] && [ ! -f "$PRD_PATH" ]; then
   echo "PRD not found: $PRD_PATH"
   exit 1
 fi
