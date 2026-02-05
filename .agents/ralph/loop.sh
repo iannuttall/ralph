@@ -260,6 +260,20 @@ if [ "$MODE" = "prd" ]; then
   else
     run_agent "$PRD_PROMPT_FILE"
   fi
+
+  # Validate generated PRD JSON
+  if [ -f "$PRD_PATH" ]; then
+    python3 -c "import json, sys; json.load(open('$PRD_PATH'))" 2>&1 || {
+      echo "ERROR: PRD JSON is invalid"
+      python3 -c "import json, sys; json.load(open('$PRD_PATH'))" 2>&1 | sed 's/^/  /'
+      exit 1
+    }
+    echo "PRD JSON validated successfully"
+  else
+    echo "ERROR: PRD file not found at $PRD_PATH"
+    exit 1
+  fi
+
   exit 0
 fi
 

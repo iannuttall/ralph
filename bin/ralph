@@ -231,13 +231,13 @@ async function runInstallSkills() {
         ? scope === "global"
           ? path.join(home, ".claude", "skills")
           : path.join(cwd, ".claude", "skills")
-        : agent === "droid"
+          : agent === "droid"
           ? scope === "global"
             ? path.join(home, ".factory", "skills")
             : path.join(cwd, ".factory", "skills")
           : scope === "global"
-            ? path.join(home, ".local", "share", "opencode", "skills")
-            : path.join(cwd, ".opencode", "skills");
+            ? path.join(home, ".config", "opencode", "skill")
+            : path.join(cwd, ".opencode", "skill");
 
   const skillsToInstall = ["commit", "dev-browser", "prd"];
   fs.mkdirSync(targetRoot, { recursive: true });
