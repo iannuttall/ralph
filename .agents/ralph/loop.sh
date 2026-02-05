@@ -137,13 +137,14 @@ require_agent() {
 
 run_agent() {
   local prompt_file="$1"
-  if [[ "$AGENT_CMD" == *"{prompt}"* ]]; then
+  local agent_cmd="${2:-$AGENT_CMD}"
+  if [[ "$agent_cmd" == *"{prompt}"* ]]; then
     local escaped
     escaped=$(printf '%q' "$prompt_file")
-    local cmd="${AGENT_CMD//\{prompt\}/$escaped}"
+    local cmd="${agent_cmd//\{prompt\}/$escaped}"
     eval "$cmd"
   else
-    cat "$prompt_file" | eval "$AGENT_CMD"
+    cat "$prompt_file" | eval "$agent_cmd"
   fi
 }
 
@@ -152,12 +153,12 @@ run_agent_inline() {
   local prompt_content
   prompt_content="$(cat "$prompt_file")"
   local escaped
-  escaped=$(printf "%s" "$prompt_content" | sed "s/'/'\\\\''/g")
+  escaped=$(printf '%q' "$prompt_content")
   local cmd="${PRD_AGENT_CMD:-$AGENT_CMD}"
   if [[ "$cmd" == *"{prompt}"* ]]; then
-    cmd="${cmd//\{prompt\}/'$escaped'}"
+    cmd="${cmd//\{prompt\}/$escaped}"
   else
-    cmd="$cmd '$escaped'"
+    cmd="$cmd $escaped"
   fi
   eval "$cmd"
 }
@@ -258,7 +259,7 @@ if [ "$MODE" = "prd" ]; then
   if [ "$PRD_USE_INLINE" -eq 1 ]; then
     run_agent_inline "$PRD_PROMPT_FILE"
   else
-    run_agent "$PRD_PROMPT_FILE"
+    run_agent "$PRD_PROMPT_FILE" "${PRD_AGENT_CMD:-$AGENT_CMD}"
   fi
   exit 0
 fi
