@@ -17,6 +17,8 @@ let installForce = false;
 let prdPath = null;
 let progressPath = null;
 let prdOutPath = null;
+let worktreeMode = false;
+let worktreeName = null;
 
 function exists(p) {
   try {
@@ -25,6 +27,121 @@ function exists(p) {
   } catch {
     return false;
   }
+}
+
+function slugify(str) {
+  return String(str)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function copyEnvFiles(srcDir, destDir) {
+  let entries;
+  try {
+    entries = fs.readdirSync(srcDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const srcPath = path.join(srcDir, entry.name);
+    const destPath = path.join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      if (["node_modules", ".ralph", ".git"].includes(entry.name)) continue;
+      copyEnvFiles(srcPath, destPath);
+    } else if (entry.name.startsWith(".env")) {
+      fs.mkdirSync(path.dirname(destPath), { recursive: true });
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
+}
+
+function resetStaleStories(prdFilePath) {
+  let text, prd;
+  try {
+    text = fs.readFileSync(prdFilePath, "utf-8");
+    prd = JSON.parse(text);
+  } catch {
+    return;
+  }
+  const stories = Array.isArray(prd.stories) ? prd.stories : [];
+  let changed = false;
+  for (const story of stories) {
+    if (String(story.status || "").toLowerCase() === "in_progress") {
+      console.log(`Reset in_progress story ${story.id || "?"} → open`);
+      story.status = "open";
+      story.startedAt = null;
+      story.completedAt = null;
+      story.updatedAt = null;
+      changed = true;
+    }
+  }
+  if (changed) {
+    fs.writeFileSync(prdFilePath, JSON.stringify(prd, null, 2) + "\n");
+  }
+}
+
+function setupWorktree(name, projectDir) {
+  const worktreeDir = path.join(projectDir, ".ralph", "worktrees", name);
+  const branchName = "worktree-" + name;
+
+  if (exists(worktreeDir)) {
+    console.log(`Reusing existing worktree at .ralph/worktrees/${name}`);
+    console.log("Copying .env files...");
+    copyEnvFiles(projectDir, worktreeDir);
+    return { worktreeDir, branchName };
+  }
+
+  console.log(`Creating worktree at .ralph/worktrees/${name}...`);
+
+  // Check if branch already exists
+  const branchCheck = spawnSync("git", ["rev-parse", "--verify", branchName], {
+    cwd: projectDir,
+    stdio: "pipe",
+  });
+  const branchExists = branchCheck.status === 0;
+
+  const gitArgs = branchExists
+    ? ["worktree", "add", worktreeDir, branchName]
+    : ["worktree", "add", worktreeDir, "-b", branchName];
+
+  const addResult = spawnSync("git", gitArgs, {
+    cwd: projectDir,
+    stdio: "inherit",
+  });
+  if (addResult.status !== 0) {
+    console.error("Failed to create git worktree.");
+    process.exit(1);
+  }
+
+  console.log("Copying .env files...");
+  copyEnvFiles(projectDir, worktreeDir);
+
+  console.log("Installing dependencies...");
+  const installResult = spawnSync("npx", ["nypm", "i"], {
+    cwd: worktreeDir,
+    stdio: "inherit",
+  });
+  if (installResult.status !== 0) {
+    console.warn("Warning: dependency install failed. Continuing anyway.");
+  }
+
+  return { worktreeDir, branchName };
+}
+
+function printWorktreeNextSteps(name, worktreeDir, branchName, projectDir) {
+  const relDir = path.relative(projectDir, worktreeDir);
+  console.log(`
+\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+  Worktree ready: ${relDir}
+  Branch: ${branchName}
+\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+
+  Next steps:
+    Create PR:     cd ${relDir} && gh pr create
+    Merge locally: git merge ${branchName}
+    Cleanup:       git worktree remove ${relDir} && git branch -d ${branchName}
+`);
 }
 
 function readPackageMeta() {
@@ -84,6 +201,7 @@ Options:
   --out <path>                        Override PRD output path (prd command)
   --progress <path>                   Override progress log path
   --agent <codex|claude|droid|opencode>  Override agent runner
+  --worktree [name], -w [name]        Run build in a git worktree
 
 Notes:
 - Uses local .agents/ralph if present; otherwise uses bundled defaults.
@@ -178,6 +296,23 @@ for (let i = 0; i < rawArgs.length; i += 1) {
   if (arg === "--progress") {
     progressPath = rawArgs[i + 1];
     i += 1;
+    continue;
+  }
+  if (arg.startsWith("--worktree=")) {
+    worktreeMode = true;
+    worktreeName = arg.split("=").slice(1).join("=");
+    continue;
+  }
+  if (arg === "--worktree") {
+    worktreeMode = true;
+    continue;
+  }
+  if (arg === "-w") {
+    worktreeMode = true;
+    if (rawArgs[i + 1] && !rawArgs[i + 1].startsWith("-")) {
+      worktreeName = rawArgs[i + 1];
+      i += 1;
+    }
     continue;
   }
   args.push(arg);
@@ -594,12 +729,39 @@ async function main() {
       process.exit(1);
     }
     env.PRD_PATH = resolvedPrdPath;
+    resetStaleStories(resolvedPrdPath);
+  }
+
+  let worktreeDir = null;
+  let branchName = null;
+
+  if (worktreeMode) {
+    if (!worktreeName) {
+      try {
+        const prdText = fs.readFileSync(env.PRD_PATH, "utf-8");
+        const prd = JSON.parse(prdText);
+        if (prd.project) {
+          worktreeName = slugify(prd.project);
+        }
+      } catch {}
+      if (!worktreeName) {
+        worktreeName = "worktree-" + Date.now();
+      }
+    }
+    const wt = setupWorktree(worktreeName, cwd);
+    worktreeDir = wt.worktreeDir;
+    branchName = wt.branchName;
+    env.RALPH_WORKTREE = worktreeDir;
   }
 
   const result = spawnSync(loopPath, loopArgs, {
     stdio: "inherit",
     env,
   });
+
+  if (worktreeMode && worktreeDir) {
+    printWorktreeNextSteps(worktreeName, worktreeDir, branchName, cwd);
+  }
 
   process.exit(result.status ?? 1);
 }
