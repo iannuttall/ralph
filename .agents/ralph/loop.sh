@@ -11,6 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${RALPH_ROOT:-${SCRIPT_DIR}/../..}" && pwd)"
+WORK_DIR="${RALPH_WORKTREE:-$ROOT_DIR}"
 CONFIG_FILE="${SCRIPT_DIR}/config.sh"
 
 DEFAULT_PRD_PATH=".agents/tasks/prd.json"
@@ -347,7 +348,7 @@ render_prompt() {
   local iter="$6"
   local run_log="$7"
   local run_meta="$8"
-  python3 - "$src" "$dst" "$PRD_PATH" "$AGENTS_PATH" "$PROGRESS_PATH" "$ROOT_DIR" "$GUARDRAILS_PATH" "$ERRORS_LOG_PATH" "$ACTIVITY_LOG_PATH" "$GUARDRAILS_REF" "$CONTEXT_REF" "$ACTIVITY_CMD" "$NO_COMMIT" "$story_meta" "$story_block" "$run_id" "$iter" "$run_log" "$run_meta" <<'PY'
+  python3 - "$src" "$dst" "$PRD_PATH" "$AGENTS_PATH" "$PROGRESS_PATH" "$WORK_DIR" "$GUARDRAILS_PATH" "$ERRORS_LOG_PATH" "$ACTIVITY_LOG_PATH" "$GUARDRAILS_REF" "$CONTEXT_REF" "$ACTIVITY_CMD" "$NO_COMMIT" "$story_meta" "$story_block" "$run_id" "$iter" "$run_log" "$run_meta" <<'PY'
 import sys
 from pathlib import Path
 
@@ -802,8 +803,8 @@ write_run_meta() {
 }
 
 git_head() {
-  if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true
+  if git -C "$WORK_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$WORK_DIR" rev-parse HEAD 2>/dev/null || true
   else
     echo ""
   fi
@@ -813,7 +814,7 @@ git_commit_list() {
   local before="$1"
   local after="$2"
   if [ -n "$before" ] && [ -n "$after" ] && [ "$before" != "$after" ]; then
-    git -C "$ROOT_DIR" log --oneline "$before..$after" | sed 's/^/- /'
+    git -C "$WORK_DIR" log --oneline "$before..$after" | sed 's/^/- /'
   else
     echo ""
   fi
@@ -823,15 +824,15 @@ git_changed_files() {
   local before="$1"
   local after="$2"
   if [ -n "$before" ] && [ -n "$after" ] && [ "$before" != "$after" ]; then
-    git -C "$ROOT_DIR" diff --name-only "$before" "$after" | sed 's/^/- /'
+    git -C "$WORK_DIR" diff --name-only "$before" "$after" | sed 's/^/- /'
   else
     echo ""
   fi
 }
 
 git_dirty_files() {
-  if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    git -C "$ROOT_DIR" status --porcelain | awk '{print "- " $2}'
+  if git -C "$WORK_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$WORK_DIR" status --porcelain | awk '{print "- " $2}'
   else
     echo ""
   fi
