@@ -9,6 +9,8 @@ AGENT_DROID_CMD="droid exec --skip-permissions-unsafe -f {prompt}"
 AGENT_DROID_INTERACTIVE_CMD="droid --skip-permissions-unsafe {prompt}"
 AGENT_OPENCODE_CMD="opencode run \"\$(cat {prompt})\""
 AGENT_OPENCODE_INTERACTIVE_CMD="opencode --prompt {prompt}"
+AGENT_COPILOT_CMD="copilot -p \"\$(cat {prompt})\" -s --allow-all"
+AGENT_COPILOT_INTERACTIVE_CMD="copilot -p {prompt} -s --allow-all"
 # Uncomment to use server mode (faster, avoids cold boot):
 # AGENT_OPENCODE_CMD="opencode run --attach http://localhost:4096 \"\$(cat {prompt})\""
 # AGENT_OPENCODE_INTERACTIVE_CMD="opencode --prompt {prompt} --attach http://localhost:4096"

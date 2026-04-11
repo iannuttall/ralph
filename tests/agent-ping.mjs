@@ -18,6 +18,7 @@ const agents = [
   { name: "claude", bin: "claude" },
   { name: "droid", bin: "droid" },
   { name: "opencode", bin: "opencode" },
+  { name: "copilot", bin: "copilot" },
 ];
 const runnable = [];
 const skipped = [];

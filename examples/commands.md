@@ -16,6 +16,8 @@ ralph ping --agent=codex # check agent is installed + responsive
 ralph build 1 --agent=codex # one Ralph run
 ralph build 1 --agent=claude # one Ralph run
 ralph build 1 --agent=droid # one Ralph run
+ralph build 1 --agent=opencode # one Ralph run
+ralph build 1 --agent=copilot # one Ralph run
 ```
 
 PRD overrides:
