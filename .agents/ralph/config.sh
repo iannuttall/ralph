@@ -18,6 +18,9 @@
 # PRD_AGENT_CMD="codex --yolo --skip-git-repo-check {prompt}"
 # AGENT_CMD="claude -p --dangerously-skip-permissions \"\$(cat {prompt})\""
 # AGENT_CMD="droid exec --skip-permissions-unsafe -f {prompt}"
+# AGENT_CMD="opencode run \"\$(cat {prompt})\""
+# AGENT_CMD="copilot -p \"\$(cat {prompt})\" -s --allow-all"
+# PRD_AGENT_CMD="copilot -p {prompt} -s --allow-all"
 # AGENTS_PATH="AGENTS.md"
 # PROMPT_BUILD=".agents/ralph/PROMPT_build.md"
 # NO_COMMIT=false

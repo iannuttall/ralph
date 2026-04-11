@@ -47,7 +47,7 @@ function setupTempProject() {
   return base;
 }
 
-const agents = ["codex", "claude", "droid"];
+const agents = ["codex", "claude", "droid", "copilot"];
 const integration = process.env.RALPH_INTEGRATION === "1";
 
 for (const agent of agents) {
@@ -64,6 +64,9 @@ for (const agent of agents) {
       continue;
     } else if (agent === "droid" && !commandExists("droid")) {
       console.log(`Skipping droid integration test (missing droid).`);
+      continue;
+    } else if (agent === "copilot" && !commandExists("copilot")) {
+      console.log(`Skipping copilot integration test (missing copilot).`);
       continue;
     }
 

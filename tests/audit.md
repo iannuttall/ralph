@@ -24,7 +24,7 @@
 
 ### Agent ping (fast, real)
 - `tests/agent-ping.mjs`
-  - Runs `ralph ping` for codex/claude/droid
+  - Runs `ralph ping` for codex/claude/droid/opencode/copilot
   - Verifies each agent responds with `<end>pong</end>`
 
 ### Real integration (new)

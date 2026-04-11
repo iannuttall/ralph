@@ -14,9 +14,11 @@ const skillsRoot = path.join(repoRoot, "skills");
 let agentOverride = null;
 let installSkills = false;
 let installForce = false;
+let copilotReasoningEffort = null;
 let prdPath = null;
 let progressPath = null;
 let prdOutPath = null;
+const VALID_COPILOT_REASONING_EFFORTS = new Set(["low", "medium", "high"]);
 
 function exists(p) {
   try {
@@ -83,7 +85,8 @@ Options:
   --prd <path>                        Override PRD path
   --out <path>                        Override PRD output path (prd command)
   --progress <path>                   Override progress log path
-  --agent <codex|claude|droid|opencode>  Override agent runner
+  --copilot-reasoning-effort <low|medium|high>  Default effort for Copilot install prompt
+  --agent <codex|claude|droid|opencode|copilot>  Override agent runner
 
 Notes:
 - Uses local .agents/ralph if present; otherwise uses bundled defaults.
@@ -153,6 +156,15 @@ for (let i = 0; i < rawArgs.length; i += 1) {
     installForce = true;
     continue;
   }
+  if (arg.startsWith("--copilot-reasoning-effort=")) {
+    copilotReasoningEffort = arg.split("=").slice(1).join("=");
+    continue;
+  }
+  if (arg === "--copilot-reasoning-effort") {
+    copilotReasoningEffort = rawArgs[i + 1];
+    i += 1;
+    continue;
+  }
   if (arg.startsWith("--prd=")) {
     prdPath = arg.split("=").slice(1).join("=");
     continue;
@@ -183,6 +195,19 @@ for (let i = 0; i < rawArgs.length; i += 1) {
   args.push(arg);
 }
 
+if (copilotReasoningEffort !== null) {
+  const normalizedEffort = String(copilotReasoningEffort || "")
+    .trim()
+    .toLowerCase();
+  if (!VALID_COPILOT_REASONING_EFFORTS.has(normalizedEffort)) {
+    console.error(
+      "Invalid value for --copilot-reasoning-effort. Valid values: low, medium, high"
+    );
+    process.exit(1);
+  }
+  copilotReasoningEffort = normalizedEffort;
+}
+
 const cmd = args[0];
 if (cmd === "help" || cmd === "-h" || cmd === "--help") {
   usage();
@@ -190,7 +215,7 @@ if (cmd === "help" || cmd === "-h" || cmd === "--help") {
 }
 
 async function runInstallSkills() {
-  const { intro, outro, select, isCancel } = await import("@clack/prompts");
+  const { intro, outro, select, text, isCancel } = await import("@clack/prompts");
   intro("Ralph skills install");
 
   const agent = await select({
@@ -200,6 +225,7 @@ async function runInstallSkills() {
       { value: "claude", label: "claude" },
       { value: "droid", label: "droid" },
       { value: "opencode", label: "opencode" },
+      { value: "copilot", label: "copilot" },
     ],
     initialValue: agentOverride || "codex",
   });
@@ -235,9 +261,13 @@ async function runInstallSkills() {
           ? scope === "global"
             ? path.join(home, ".factory", "skills")
             : path.join(cwd, ".factory", "skills")
-          : scope === "global"
-            ? path.join(home, ".local", "share", "opencode", "skills")
-            : path.join(cwd, ".opencode", "skills");
+          : agent === "opencode"
+            ? scope === "global"
+              ? path.join(home, ".local", "share", "opencode", "skills")
+              : path.join(cwd, ".opencode", "skills")
+            : scope === "global"
+              ? path.join(home, ".copilot", "skills")
+              : path.join(cwd, ".copilot", "skills");
 
   const skillsToInstall = ["commit", "dev-browser", "prd"];
   fs.mkdirSync(targetRoot, { recursive: true });
@@ -264,6 +294,72 @@ async function runInstallSkills() {
   }
   if (skipped.length) {
     console.log(`Skipped: ${skipped.join(", ")}`);
+  }
+
+  if (agent === "copilot") {
+    const model = await text({
+      message: "Copilot model for this project (leave blank to skip)",
+      placeholder: "gpt-5.4",
+      initialValue: "gpt-5.4",
+    });
+    if (isCancel(model)) {
+      outro("Cancelled.");
+      process.exit(0);
+    }
+    const chosenModel = String(model || "").trim();
+    const effort = await text({
+      message: "Copilot reasoning effort (low|medium|high; leave blank to skip)",
+      placeholder: "medium",
+      initialValue: copilotReasoningEffort || "medium",
+    });
+    if (isCancel(effort)) {
+      outro("Cancelled.");
+      process.exit(0);
+    }
+    const chosenEffort = String(effort || "")
+      .trim()
+      .toLowerCase();
+    if (chosenEffort && !VALID_COPILOT_REASONING_EFFORTS.has(chosenEffort)) {
+      console.error("Invalid Copilot reasoning effort. Valid values: low, medium, high");
+      process.exit(1);
+    }
+
+    if (chosenModel || chosenEffort) {
+      const configPath = path.join(localDir, "config.sh");
+      if (!exists(configPath)) {
+        console.log(`Skipped Copilot setup: config not found at ${configPath}`);
+      } else {
+        const escapeSingle = (value) => String(value).replace(/'/g, `'\"'\"'`);
+        const modelPart = chosenModel ? ` --model ${escapeSingle(chosenModel)}` : "";
+        const effortPart = chosenEffort
+          ? ` --reasoning-effort ${escapeSingle(chosenEffort)}`
+          : "";
+        const agentLine =
+          `AGENT_CMD='copilot -p "$(cat {prompt})" -s --allow-all${modelPart}${effortPart}'`;
+        const prdAgentLine =
+          `PRD_AGENT_CMD='copilot -p {prompt} -s --allow-all${modelPart}${effortPart}'`;
+        const upsertVar = (source, key, line) => {
+          const setPattern = new RegExp(`^${key}=.*$`, "m");
+          if (setPattern.test(source)) {
+            return source.replace(setPattern, line);
+          }
+          const commentedPattern = new RegExp(`^#\\s*${key}=.*$`, "m");
+          if (commentedPattern.test(source)) {
+            return source.replace(commentedPattern, line);
+          }
+          const suffix = source.endsWith("\n") ? "" : "\n";
+          return `${source}${suffix}${line}\n`;
+        };
+        let config = fs.readFileSync(configPath, "utf-8");
+        config = upsertVar(config, "AGENT_CMD", agentLine);
+        config = upsertVar(config, "PRD_AGENT_CMD", prdAgentLine);
+        fs.writeFileSync(configPath, config);
+        const configuredParts = [];
+        if (chosenModel) configuredParts.push(`model '${chosenModel}'`);
+        if (chosenEffort) configuredParts.push(`reasoning effort '${chosenEffort}'`);
+        console.log(`Configured Copilot ${configuredParts.join(" + ")} in ${configPath}`);
+      }
+    }
   }
   outro("Done.");
 }
@@ -354,12 +450,14 @@ async function main() {
       claude: "claude -p --dangerously-skip-permissions \"$(cat {prompt})\"",
       droid: "droid exec --skip-permissions-unsafe -f {prompt}",
       opencode: "opencode run \"$(cat {prompt})\"",
+      copilot: "copilot -p \"$(cat {prompt})\" -s --allow-all",
     };
     const interactiveDefaults = {
       codex: "codex --yolo {prompt}",
       claude: "claude --dangerously-skip-permissions {prompt}",
       droid: "droid --skip-permissions-unsafe {prompt}",
       opencode: "opencode --prompt {prompt}",
+      copilot: "copilot -p {prompt} -s --allow-all",
     };
     const agentsPath = path.join(templateDir, "agents.sh");
     if (!exists(agentsPath)) {
@@ -377,10 +475,12 @@ async function main() {
       'printf "AGENT_CLAUDE_CMD=%s\\n" "${AGENT_CLAUDE_CMD:-}"',
       'printf "AGENT_DROID_CMD=%s\\n" "${AGENT_DROID_CMD:-}"',
       'printf "AGENT_OPENCODE_CMD=%s\\n" "${AGENT_OPENCODE_CMD:-}"',
+      'printf "AGENT_COPILOT_CMD=%s\\n" "${AGENT_COPILOT_CMD:-}"',
       'printf "AGENT_CODEX_INTERACTIVE_CMD=%s\\n" "${AGENT_CODEX_INTERACTIVE_CMD:-}"',
       'printf "AGENT_CLAUDE_INTERACTIVE_CMD=%s\\n" "${AGENT_CLAUDE_INTERACTIVE_CMD:-}"',
       'printf "AGENT_DROID_INTERACTIVE_CMD=%s\\n" "${AGENT_DROID_INTERACTIVE_CMD:-}"',
       'printf "AGENT_OPENCODE_INTERACTIVE_CMD=%s\\n" "${AGENT_OPENCODE_INTERACTIVE_CMD:-}"',
+      'printf "AGENT_COPILOT_INTERACTIVE_CMD=%s\\n" "${AGENT_COPILOT_INTERACTIVE_CMD:-}"',
     ].join("; ");
     const result = spawnSync("bash", ["-lc", bashCmd], { encoding: "utf-8" });
     if (result.status !== 0) {
@@ -404,12 +504,14 @@ async function main() {
         claude: readVar("AGENT_CLAUDE_CMD") || defaults.claude,
         droid: readVar("AGENT_DROID_CMD") || defaults.droid,
         opencode: readVar("AGENT_OPENCODE_CMD") || defaults.opencode,
+        copilot: readVar("AGENT_COPILOT_CMD") || defaults.copilot,
       },
       interactive: {
         codex: readVar("AGENT_CODEX_INTERACTIVE_CMD") || interactiveDefaults.codex,
         claude: readVar("AGENT_CLAUDE_INTERACTIVE_CMD") || interactiveDefaults.claude,
         droid: readVar("AGENT_DROID_INTERACTIVE_CMD") || interactiveDefaults.droid,
         opencode: readVar("AGENT_OPENCODE_INTERACTIVE_CMD") || interactiveDefaults.opencode,
+        copilot: readVar("AGENT_COPILOT_INTERACTIVE_CMD") || interactiveDefaults.copilot,
       },
       defaultAgent: readVar("DEFAULT_AGENT") || "codex",
     };
@@ -422,7 +524,7 @@ async function main() {
     const mapped = agentMap[agentOverride];
     if (!mapped) {
       console.error(`Unknown agent: ${agentOverride}`);
-      console.error("Valid values: codex, claude, droid, opencode");
+      console.error("Valid values: codex, claude, droid, opencode, copilot");
       process.exit(1);
     }
     process.env.AGENT_CMD = mapped;

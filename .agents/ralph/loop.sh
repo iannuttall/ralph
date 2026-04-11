@@ -57,6 +57,12 @@ resolve_agent_cmd() {
     droid)
       echo "${AGENT_DROID_CMD:-droid exec --skip-permissions-unsafe -f {prompt}}"
       ;;
+    opencode)
+      echo "${AGENT_OPENCODE_CMD:-opencode run \"\$(cat {prompt})\"}"
+      ;;
+    copilot)
+      echo "${AGENT_COPILOT_CMD:-copilot -p \"\$(cat {prompt})\" -s --allow-all}"
+      ;;
     codex|"")
       echo "${AGENT_CODEX_CMD:-codex exec --yolo --skip-git-repo-check -}"
       ;;
@@ -128,6 +134,9 @@ require_agent() {
         ;;
       opencode)
         echo "Install: curl -fsSL https://opencode.ai/install.sh | bash"
+        ;;
+      copilot)
+        echo "Install: npm install -g @github/copilot"
         ;;
     esac
     echo "Then authenticate per the CLI's instructions."
