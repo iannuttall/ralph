@@ -60,6 +60,11 @@ ln -sfn "$install_dir/bin/ralph" "$bin_dir/ralph"
 
 echo "ralph installed to $install_dir"
 echo "binary linked at $bin_dir/ralph"
+existing="$(command -v ralph || true)"
+if [ -n "$existing" ] && [ "$existing" != "$bin_dir/ralph" ]; then
+  echo "warning: existing ralph earlier in PATH: $existing"
+  echo "run this build directly with: $bin_dir/ralph"
+fi
 if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
   echo "Add this to PATH if needed: export PATH=\"$bin_dir:\$PATH\""
 fi
