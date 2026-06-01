@@ -615,6 +615,7 @@ run_review_gate() {
   local build_log="$7"
   local run_meta="$8"
 
+  mkdir -p "$TMP_DIR" "$RUNS_DIR"
   local review_prompt="$TMP_DIR/review-prompt-$RUN_TAG-$iter.md"
   local review_log="$RUNS_DIR/run-$RUN_TAG-iter-$iter-review.log"
   render_review_prompt "$review_prompt" "$story_id" "$story_title" "$story_block" "$base_sha" "$build_head_sha" "$build_log" "$run_meta" "$review_log"
@@ -1086,6 +1087,7 @@ echo "PRD: $PRD_PATH"
 HAS_ERROR="false"
 
 for i in $(seq 1 "$MAX_ITERATIONS"); do
+  mkdir -p "$TMP_DIR" "$RUNS_DIR"
   echo ""
   echo "═══════════════════════════════════════════════════════"
   echo "  Ralph Iteration $i of $MAX_ITERATIONS"

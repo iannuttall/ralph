@@ -57,7 +57,7 @@ function setupTempProject() {
   return base;
 }
 
-function runReviewGateCase({ name, reviewLines, expectedExit, expectedStoryStatus, env = {}, expectPrompt = false }) {
+function runReviewGateCase({ name, buildLines = [], reviewLines, expectedExit, expectedStoryStatus, env = {}, expectPrompt = false }) {
   const projectRoot = setupTempProject();
   const fakeBuild = path.join(projectRoot, "fake-build-agent.sh");
   const fakeReview = path.join(projectRoot, "fake-review-agent.sh");
@@ -69,6 +69,7 @@ function runReviewGateCase({ name, reviewLines, expectedExit, expectedStoryStatu
     [
       "#!/usr/bin/env bash",
       "cat >/dev/null",
+      ...buildLines,
       "echo '<promise>COMPLETE</promise>'",
       "",
     ].join("\n"),
@@ -281,6 +282,15 @@ runReviewGateCase({
   expectedExit: 0,
   expectedStoryStatus: "done",
   env: { REVIEW_AFTER_BUILD: "false" },
+  expectPrompt: true,
+});
+
+runReviewGateCase({
+  name: "Review gate recreates tmp dir",
+  buildLines: ["rm -rf .ralph/.tmp"],
+  reviewLines: ["echo '<review>MERGEABLE</review>'"],
+  expectedExit: 0,
+  expectedStoryStatus: "done",
   expectPrompt: true,
 });
 
