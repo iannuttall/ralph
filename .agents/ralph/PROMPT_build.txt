@@ -32,6 +32,11 @@ Story details:
 If the story details are empty or missing, STOP and report that the PRD story format could not be parsed.
 
 ## Rules (Non-Negotiable)
+- Use the `$use-gpt55-subagents` skill before substantial implementation work.
+- Main session remains orchestrator: plan, integrate, verify, and communicate final status.
+- Spawn subagents only for bounded sidecar work that can run without blocking immediate implementation.
+- Spawned subagents must use `model: "gpt-5.5"`, `reasoning_effort: "xhigh"`, and `service_tier: "priority"`.
+- If no useful subagent work exists, record the local-only reason in the progress entry.
 - Implement **only** the work required to complete the selected story.
 - Complete all tasks associated with this story (and only this story).
 - Do NOT ask the user questions.
@@ -81,6 +86,7 @@ Run summary: {{RUN_META_PATH}}
   - <file path>
   - <file path>
 - What was implemented
+- Subagents used, or local-only reason
 - **Learnings for future iterations:**
   - Patterns discovered
   - Gotchas encountered

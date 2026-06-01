@@ -433,7 +433,7 @@ async function main() {
   }
   if (progressPath) env.PROGRESS_PATH = progressPath;
   if (templateDir === globalDir) {
-    env.PROMPT_BUILD = path.join(templateDir, "PROMPT_build.md");
+    env.PROMPT_BUILD = path.join(templateDir, "PROMPT_build.txt");
     env.GUARDRAILS_REF = path.join(templateDir, "references", "GUARDRAILS.md");
     env.CONTEXT_REF = path.join(templateDir, "references", "CONTEXT_ENGINEERING.md");
   }

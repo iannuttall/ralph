@@ -524,6 +524,8 @@ render_review_prompt() {
     cat <<EOF
 You are a fresh Codex review/fix session launched by Ralph after a build iteration.
 
+Use the \$use-gpt55-subagents skill before review work. Keep this review session as orchestrator. Spawn GPT-5.5 subagents with xhigh reasoning and priority service tier for bounded sidecar review, log analysis, or verification work when it can run independently. If review work is too coupled for delegation, state the local-only reason in the review log.
+
 Use the \$superpowers:requesting-code-review skill to review the completed code changes. If the reviewer finds Critical or Important issues, use the \$superpowers:receiving-code-review skill before applying fixes. Fix valid findings and request another review. Repeat until the latest review verdict is mergeable, up to ${REVIEW_MAX_ROUNDS} review round(s).
 
 ## Story

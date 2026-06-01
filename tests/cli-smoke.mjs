@@ -39,6 +39,17 @@ assertCodexCommandPinned(cliPath);
 assertCodexCommandPinned(path.join(repoRoot, ".agents", "ralph", "agents.sh"));
 assertCodexCommandPinned(path.join(repoRoot, ".agents", "ralph", "loop.sh"));
 
+const buildPrompt = readFileSync(path.join(repoRoot, ".agents", "ralph", "PROMPT_build.txt"), "utf-8");
+if (!buildPrompt.includes("$use-gpt55-subagents")) {
+  console.error("Build prompt missing use-gpt55-subagents instruction.");
+  process.exit(1);
+}
+const cliContents = readFileSync(cliPath, "utf-8");
+if (!cliContents.includes("PROMPT_build.txt")) {
+  console.error("CLI does not point bundled builds at PROMPT_build.txt.");
+  process.exit(1);
+}
+
 run(process.execPath, [cliPath, "--help"]);
 
 const projectRoot = mkdtempSync(path.join(tmpdir(), "ralph-cli-"));

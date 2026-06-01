@@ -115,6 +115,10 @@ function runReviewGateCase({ name, reviewLines, expectedExit, expectedStoryStatu
         console.error(`${name} failed: missing requesting-code-review instruction.`);
         process.exit(1);
       }
+      if (!prompt.includes("$use-gpt55-subagents")) {
+        console.error(`${name} failed: missing use-gpt55-subagents instruction.`);
+        process.exit(1);
+      }
       if (!prompt.includes("$superpowers:receiving-code-review")) {
         console.error(`${name} failed: missing receiving-code-review instruction.`);
         process.exit(1);
