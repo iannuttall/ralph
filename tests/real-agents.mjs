@@ -82,14 +82,14 @@ function assertAllStoriesComplete(prdPath) {
   }
 }
 
-function assertCommitted(cwd) {
+function assertNoCommits(cwd) {
   const result = spawnSync("git", ["rev-list", "--count", "HEAD"], { cwd, encoding: "utf-8" });
   if (result.status !== 0) {
-    throw new Error("Failed to read git history.");
+    return;
   }
   const count = Number(result.stdout.trim() || "0");
-  if (count < 1) {
-    throw new Error("Expected at least one commit, found none.");
+  if (count > 0) {
+    throw new Error(`Expected no commits, found ${count}.`);
   }
 }
 
@@ -106,7 +106,7 @@ function runForAgent(agent) {
 
     const prdPath = path.join(projectRoot, ".agents", "tasks", "prd.json");
     assertAllStoriesComplete(prdPath);
-    assertCommitted(projectRoot);
+    assertNoCommits(projectRoot);
 
     const progressPath = path.join(projectRoot, ".ralph", "progress.md");
     if (!existsSync(progressPath)) {

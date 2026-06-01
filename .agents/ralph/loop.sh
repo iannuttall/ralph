@@ -16,7 +16,7 @@ CONFIG_FILE="${SCRIPT_DIR}/config.sh"
 DEFAULT_PRD_PATH=".agents/tasks/prd.json"
 DEFAULT_PROGRESS_PATH=".ralph/progress.md"
 DEFAULT_AGENTS_PATH="AGENTS.md"
-DEFAULT_PROMPT_BUILD=".agents/ralph/PROMPT_build.md"
+DEFAULT_PROMPT_BUILD=".agents/ralph/PROMPT_build.txt"
 DEFAULT_GUARDRAILS_PATH=".ralph/guardrails.md"
 DEFAULT_ERRORS_LOG_PATH=".ralph/errors.log"
 DEFAULT_ACTIVITY_LOG_PATH=".ralph/activity.log"
@@ -36,8 +36,10 @@ if [[ -f "$agents_path" ]]; then
 fi
 
 DEFAULT_MAX_ITERATIONS=25
-DEFAULT_NO_COMMIT=false
+DEFAULT_NO_COMMIT=true
 DEFAULT_STALE_SECONDS=0
+DEFAULT_REVIEW_CMD="codex exec --yolo --skip-git-repo-check -m gpt-5.5 -c model_reasoning_effort=\"xhigh\" -c service_tier=\"priority\" -"
+DEFAULT_REVIEW_MAX_ROUNDS=3
 PRD_REQUEST_PATH=""
 PRD_INLINE=""
 
@@ -58,10 +60,10 @@ resolve_agent_cmd() {
       echo "${AGENT_DROID_CMD:-droid exec --skip-permissions-unsafe -f {prompt}}"
       ;;
     codex|"")
-      echo "${AGENT_CODEX_CMD:-codex exec --yolo --skip-git-repo-check -}"
+      echo "${AGENT_CODEX_CMD:-codex exec --yolo --skip-git-repo-check -m gpt-5.5 -c model_reasoning_effort=\"xhigh\" -c service_tier=\"priority\" -}"
       ;;
     *)
-      echo "${AGENT_CODEX_CMD:-codex exec --yolo --skip-git-repo-check -}"
+      echo "${AGENT_CODEX_CMD:-codex exec --yolo --skip-git-repo-check -m gpt-5.5 -c model_reasoning_effort=\"xhigh\" -c service_tier=\"priority\" -}"
       ;;
   esac
 }
@@ -83,6 +85,8 @@ AGENT_CMD="${AGENT_CMD:-$DEFAULT_AGENT_CMD}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-$DEFAULT_MAX_ITERATIONS}"
 NO_COMMIT="${NO_COMMIT:-$DEFAULT_NO_COMMIT}"
 STALE_SECONDS="${STALE_SECONDS:-$DEFAULT_STALE_SECONDS}"
+REVIEW_CMD="${REVIEW_CMD:-$DEFAULT_REVIEW_CMD}"
+REVIEW_MAX_ROUNDS="${REVIEW_MAX_ROUNDS:-$DEFAULT_REVIEW_MAX_ROUNDS}"
 
 abs_path() {
   local p="$1"
@@ -105,6 +109,8 @@ RUNS_DIR="$(abs_path "$RUNS_DIR")"
 GUARDRAILS_REF="$(abs_path "$GUARDRAILS_REF")"
 CONTEXT_REF="$(abs_path "$CONTEXT_REF")"
 ACTIVITY_CMD="$(abs_path "$ACTIVITY_CMD")"
+REAL_GIT_BIN="$(command -v git || true)"
+GIT_GUARD_DIR="$TMP_DIR/git-guard"
 
 require_agent() {
   local agent_cmd="${1:-$AGENT_CMD}"
@@ -141,9 +147,37 @@ run_agent() {
     local escaped
     escaped=$(printf '%q' "$prompt_file")
     local cmd="${AGENT_CMD//\{prompt\}/$escaped}"
-    eval "$cmd"
+    (
+      export PATH="$GIT_GUARD_DIR:$PATH"
+      export RALPH_REAL_GIT="$REAL_GIT_BIN"
+      eval "$cmd"
+    )
   else
-    cat "$prompt_file" | eval "$AGENT_CMD"
+    (
+      export PATH="$GIT_GUARD_DIR:$PATH"
+      export RALPH_REAL_GIT="$REAL_GIT_BIN"
+      cat "$prompt_file" | eval "$AGENT_CMD"
+    )
+  fi
+}
+
+run_review_agent() {
+  local prompt_file="$1"
+  if [[ "$REVIEW_CMD" == *"{prompt}"* ]]; then
+    local escaped
+    escaped=$(printf '%q' "$prompt_file")
+    local cmd="${REVIEW_CMD//\{prompt\}/$escaped}"
+    (
+      export PATH="$GIT_GUARD_DIR:$PATH"
+      export RALPH_REAL_GIT="$REAL_GIT_BIN"
+      eval "$cmd"
+    )
+  else
+    (
+      export PATH="$GIT_GUARD_DIR:$PATH"
+      export RALPH_REAL_GIT="$REAL_GIT_BIN"
+      cat "$prompt_file" | eval "$REVIEW_CMD"
+    )
   fi
 }
 
@@ -191,6 +225,7 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+NO_COMMIT=true
 
 PROMPT_FILE="$PROMPT_BUILD"
 
@@ -278,6 +313,71 @@ if [ "$MODE" != "prd" ] && [ ! -f "$PRD_PATH" ]; then
 fi
 
 mkdir -p "$(dirname "$PROGRESS_PATH")" "$TMP_DIR" "$RUNS_DIR"
+
+REAL_GIT_BIN="$(command -v git || true)"
+GIT_GUARD_DIR="$TMP_DIR/git-guard"
+
+install_git_guard() {
+  if [ -z "$REAL_GIT_BIN" ]; then
+    return 0
+  fi
+  mkdir -p "$GIT_GUARD_DIR"
+  cat > "$GIT_GUARD_DIR/git" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+real_git="${RALPH_REAL_GIT:-git}"
+subcommand="${1:-}"
+if [ "$#" -gt 0 ]; then
+  shift
+fi
+
+is_ralph_path() {
+  case "$1" in
+    .ralph|.ralph/*|./.ralph|./.ralph/*|.agents/tasks|.agents/tasks/*|./.agents/tasks|./.agents/tasks/*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+case "$subcommand" in
+  commit)
+    echo "Ralph git guard: git commit is disabled. Ralph never creates commits." >&2
+    exit 1
+    ;;
+  add)
+    for arg in "$@"; do
+      case "$arg" in
+        -A|--all|-u|--update|.|./|:/)
+          echo "Ralph git guard: broad git add is disabled so Ralph artifacts cannot be staged." >&2
+          exit 1
+          ;;
+      esac
+      if is_ralph_path "$arg"; then
+        echo "Ralph git guard: refusing to stage Ralph artifact path: $arg" >&2
+        exit 1
+      fi
+    done
+    exec "$real_git" "$subcommand" "$@"
+    ;;
+  *)
+    exec "$real_git" "$subcommand" "$@"
+    ;;
+esac
+EOF
+  chmod +x "$GIT_GUARD_DIR/git"
+}
+
+unstage_ralph_artifacts() {
+  if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$ROOT_DIR" restore --staged .ralph .agents/tasks >/dev/null 2>&1 || true
+  fi
+}
+
+install_git_guard
 
 if [ ! -f "$PROGRESS_PATH" ]; then
   {
@@ -407,6 +507,139 @@ for k, v in repl.items():
     src = src.replace("{{" + k + "}}", v)
 Path(sys.argv[2]).write_text(src)
 PY
+}
+
+render_review_prompt() {
+  local dst="$1"
+  local story_id="$2"
+  local story_title="$3"
+  local story_block="$4"
+  local base_sha="$5"
+  local build_head_sha="$6"
+  local build_log="$7"
+  local run_meta="$8"
+  local review_log="$9"
+
+  {
+    cat <<EOF
+You are a fresh Codex review/fix session launched by Ralph after a build iteration.
+
+Use the \$superpowers:requesting-code-review skill to review the completed code changes. If the reviewer finds Critical or Important issues, use the \$superpowers:receiving-code-review skill before applying fixes. Fix valid findings and request another review. Repeat until the latest review verdict is mergeable, up to ${REVIEW_MAX_ROUNDS} review round(s).
+
+## Story
+ID: ${story_id}
+Title: ${story_title}
+
+Story details:
+EOF
+    if [ -f "$story_block" ]; then
+      cat "$story_block"
+    else
+      echo "(story block unavailable)"
+    fi
+    cat <<EOF
+
+## Paths
+- PRD: ${PRD_PATH}
+- Progress Log: ${PROGRESS_PATH}
+- Guardrails: ${GUARDRAILS_PATH}
+- Errors Log: ${ERRORS_LOG_PATH}
+- Activity Log: ${ACTIVITY_LOG_PATH}
+- Build Log: ${build_log}
+- Run Summary: ${run_meta}
+- Review Log: ${review_log}
+- Repo Root: ${ROOT_DIR}
+- No-commit: ${NO_COMMIT}
+
+## Git Range
+- Base before Ralph build: ${base_sha:-unknown}
+- Head after Ralph build: ${build_head_sha:-unknown}
+
+Review this committed range if both SHAs exist:
+\`\`\`bash
+git diff --stat ${base_sha:-HEAD}..${build_head_sha:-HEAD}
+git diff ${base_sha:-HEAD}..${build_head_sha:-HEAD}
+\`\`\`
+
+Also review any uncommitted changes:
+\`\`\`bash
+git status --short
+git diff
+\`\`\`
+
+## Rules
+- Do not ask the user questions.
+- Keep scope to this story and review fixes only.
+- Treat "Ready to merge? Yes" with no Critical or Important findings as mergeable.
+- Treat "Ready to merge? No" or "With fixes" as not mergeable until valid Critical/Important findings are fixed and reviewed again.
+- Minor-only findings do not block mergeability if you intentionally leave them and explain why.
+- Do not commit or push changes.
+- Do not run broad git staging commands such as \`git add -A\` or \`git add .\`.
+- Do not stage Ralph artifacts under \`.ralph/\` or \`.agents/tasks/\`.
+- If you make fixes, append concise review/fix notes and verification results to the progress log.
+- Run focused verification for any fixes you make.
+
+## Required Final Signal
+Output this exact signal only after the latest review verdict is mergeable:
+<review>MERGEABLE</review>
+
+If review cannot reach mergeable state, output:
+<review>BLOCKED</review>
+and briefly explain the blocker.
+EOF
+  } > "$dst"
+}
+
+latest_review_signal() {
+  local review_log="$1"
+  python3 - "$review_log" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(errors="replace")
+matches = re.findall(r"<review>(MERGEABLE|BLOCKED)</review>", text)
+print(matches[-1] if matches else "")
+PY
+}
+
+run_review_gate() {
+  local iter="$1"
+  local story_id="$2"
+  local story_title="$3"
+  local story_block="$4"
+  local base_sha="$5"
+  local build_head_sha="$6"
+  local build_log="$7"
+  local run_meta="$8"
+
+  local review_prompt="$TMP_DIR/review-prompt-$RUN_TAG-$iter.md"
+  local review_log="$RUNS_DIR/run-$RUN_TAG-iter-$iter-review.log"
+  render_review_prompt "$review_prompt" "$story_id" "$story_title" "$story_block" "$base_sha" "$build_head_sha" "$build_log" "$run_meta" "$review_log"
+
+  log_activity "ITERATION $iter review start (story=$story_id)"
+  set +e
+  if [ "${RALPH_DRY_RUN:-}" = "1" ]; then
+    echo "[RALPH_DRY_RUN] Skipping review agent." | tee "$review_log"
+    review_status=0
+  else
+    require_agent "$REVIEW_CMD"
+    run_review_agent "$review_prompt" 2>&1 | tee "$review_log"
+    review_status=${PIPESTATUS[0]}
+  fi
+  set -e
+  log_activity "ITERATION $iter review end (status=$review_status log=$review_log)"
+
+  if [ "$review_status" -ne 0 ]; then
+    log_error "ITERATION $iter review command failed (status=$review_status); review $review_log"
+    return 1
+  fi
+  if [ "$(latest_review_signal "$review_log")" = "MERGEABLE" ]; then
+    return 0
+  fi
+
+  log_error "ITERATION $iter review did not return mergeable verdict; review $review_log"
+  return 1
 }
 
 select_story() {
@@ -831,7 +1064,15 @@ git_changed_files() {
 
 git_dirty_files() {
   if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    git -C "$ROOT_DIR" status --porcelain | awk '{print "- " $2}'
+    git -C "$ROOT_DIR" status --porcelain | awk '
+      {
+        path = substr($0, 4)
+        if (path ~ /^\.ralph(\/|$)/ || path ~ /^\.agents\/tasks(\/|$)/) {
+          next
+        }
+        print "- " path
+      }
+    '
   else
     echo ""
   fi
@@ -892,18 +1133,33 @@ for i in $(seq 1 "$MAX_ITERATIONS"); do
     run_agent "$PROMPT_RENDERED" 2>&1 | tee "$LOG_FILE"
     CMD_STATUS=$?
   fi
+  unstage_ralph_artifacts
   set -e
   if [ "$CMD_STATUS" -eq 130 ] || [ "$CMD_STATUS" -eq 143 ]; then
     echo "Interrupted."
     exit "$CMD_STATUS"
+  fi
+  if [ "$CMD_STATUS" -ne 0 ]; then
+    log_error "ITERATION $i command failed (status=$CMD_STATUS)"
+    HAS_ERROR="true"
+  fi
+  if [ "$MODE" = "build" ] && [ "$CMD_STATUS" -eq 0 ] && grep -q "<promise>COMPLETE</promise>" "$LOG_FILE"; then
+    BUILD_HEAD_AFTER="$(git_head)"
+    if ! run_review_gate "$i" "$STORY_ID" "$STORY_TITLE" "$STORY_BLOCK" "$HEAD_BEFORE" "$BUILD_HEAD_AFTER" "$LOG_FILE" "$RUN_META"; then
+      CMD_STATUS=1
+      HAS_ERROR="true"
+      log_error "ITERATION $i story $STORY_ID failed post-build review gate"
+    fi
+    unstage_ralph_artifacts
   fi
   ITER_END=$(date +%s)
   ITER_END_FMT=$(date '+%Y-%m-%d %H:%M:%S')
   ITER_DURATION=$((ITER_END - ITER_START))
   HEAD_AFTER="$(git_head)"
   log_activity "ITERATION $i end (duration=${ITER_DURATION}s)"
-  if [ "$CMD_STATUS" -ne 0 ]; then
-    log_error "ITERATION $i command failed (status=$CMD_STATUS)"
+  if [ "$MODE" = "build" ] && [ -n "$HEAD_BEFORE" ] && [ -n "$HEAD_AFTER" ] && [ "$HEAD_BEFORE" != "$HEAD_AFTER" ]; then
+    log_error "ITERATION $i created a commit; Ralph never commits"
+    CMD_STATUS=1
     HAS_ERROR="true"
   fi
   COMMIT_LIST="$(git_commit_list "$HEAD_BEFORE" "$HEAD_AFTER")"
