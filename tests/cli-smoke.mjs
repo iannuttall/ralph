@@ -44,6 +44,14 @@ if (!buildPrompt.includes("$use-gpt55-subagents")) {
   console.error("Build prompt missing use-gpt55-subagents instruction.");
   process.exit(1);
 }
+if (!buildPrompt.includes("<promise>BLOCKED</promise>")) {
+  console.error("Build prompt missing blocked promise instruction.");
+  process.exit(1);
+}
+if (!buildPrompt.includes("OPEN or MERGED")) {
+  console.error("Build prompt missing PR open/merged acceptance guidance.");
+  process.exit(1);
+}
 const cliContents = readFileSync(cliPath, "utf-8");
 if (!cliContents.includes("PROMPT_build.txt")) {
   console.error("CLI does not point bundled builds at PROMPT_build.txt.");

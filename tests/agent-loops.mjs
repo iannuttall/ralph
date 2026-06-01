@@ -150,6 +150,70 @@ function runReviewGateCase({ name, buildLines = [], reviewLines, expectedExit, e
   }
 }
 
+function runBuildSignalCase({ name, buildLines, expectedExit, expectedStoryStatus, expectReview = false }) {
+  const projectRoot = setupTempProject();
+  const fakeBuild = path.join(projectRoot, "fake-build-agent.sh");
+  const fakeReview = path.join(projectRoot, "fake-review-agent.sh");
+  const reviewPrompt = path.join(projectRoot, "review-prompt.md");
+  const prdPath = path.join(projectRoot, ".agents", "tasks", "prd.json");
+
+  writeFileSync(
+    fakeBuild,
+    [
+      "#!/usr/bin/env bash",
+      "cat >/dev/null",
+      ...buildLines,
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  writeFileSync(
+    fakeReview,
+    [
+      "#!/usr/bin/env bash",
+      `cat > ${JSON.stringify(reviewPrompt)}`,
+      "echo '<review>MERGEABLE</review>'",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  try {
+    const result = spawnSync(process.execPath, [cliPath, "build", "1", "--no-commit", "--prd", prdPath], {
+      cwd: projectRoot,
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        AGENT_CMD: fakeBuild,
+        REVIEW_CMD: fakeReview,
+      },
+    });
+
+    if (result.status !== expectedExit) {
+      console.error(`${name} failed: expected exit ${expectedExit}, got ${result.status}.`);
+      console.error(result.stdout);
+      console.error(result.stderr);
+      process.exit(1);
+    }
+    const reviewRan = existsSync(reviewPrompt);
+    if (reviewRan !== expectReview) {
+      console.error(`${name} failed: expected review ${expectReview ? "to run" : "not to run"}.`);
+      console.error(result.stdout);
+      console.error(result.stderr);
+      process.exit(1);
+    }
+    const story = readJson(prdPath).stories[0];
+    if (story.status !== expectedStoryStatus) {
+      console.error(`${name} failed: expected story ${expectedStoryStatus}, got ${story.status}.`);
+      console.error(result.stdout);
+      console.error(result.stderr);
+      process.exit(1);
+    }
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
+}
+
 function runGitGuardCase({ name, buildLines, expectedMessage }) {
   const projectRoot = setupTempProject();
   const fakeBuild = path.join(projectRoot, "fake-build-agent.sh");
@@ -304,6 +368,20 @@ runReviewGateCase({
   expectedExit: 0,
   expectedStoryStatus: "done",
   expectPrompt: true,
+});
+
+runBuildSignalCase({
+  name: "Build blocker marks story blocked",
+  buildLines: ["echo '<promise>BLOCKED</promise>'"],
+  expectedExit: 0,
+  expectedStoryStatus: "blocked",
+});
+
+runBuildSignalCase({
+  name: "Build promise final signal wins",
+  buildLines: ["echo '<promise>COMPLETE</promise>'", "echo '<promise>BLOCKED</promise>'"],
+  expectedExit: 0,
+  expectedStoryStatus: "blocked",
 });
 
 runGitGuardCase({

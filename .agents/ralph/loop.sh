@@ -575,6 +575,7 @@ git diff
 - Treat "Ready to merge? Yes" with no Critical or Important findings as mergeable.
 - Treat "Ready to merge? No" or "With fixes" as not mergeable until valid Critical/Important findings are fixed and reviewed again.
 - Minor-only findings do not block mergeability if you intentionally leave them and explain why.
+- If acceptance criteria say to "open" a PR, treat an existing PR with the requested branch/title/body/files as satisfying that action when its state is OPEN or MERGED. Only CLOSED-unmerged fails unless the story explicitly says the PR must remain open.
 - Do not commit or push changes.
 - Do not run broad git staging commands such as \`git add -A\` or \`git add .\`.
 - Do not stage Ralph artifacts under \`.ralph/\` or \`.agents/tasks/\`.
@@ -601,6 +602,19 @@ from pathlib import Path
 
 text = Path(sys.argv[1]).read_text(errors="replace")
 matches = re.findall(r"<review>(MERGEABLE|BLOCKED)</review>", text)
+print(matches[-1] if matches else "")
+PY
+}
+
+latest_promise_signal() {
+  local run_log="$1"
+  python3 - "$run_log" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(errors="replace")
+matches = re.findall(r"<promise>(COMPLETE|BLOCKED)</promise>", text)
 print(matches[-1] if matches else "")
 PY
 }
@@ -949,6 +963,10 @@ with prd_path.open("r+", encoding="utf-8") as fh:
                         story["startedAt"] = now_iso()
                     story.pop("ralphRunPid", None)
                     story.pop("ralphRunTag", None)
+                elif new_status == "blocked":
+                    story["completedAt"] = None
+                    story.pop("ralphRunPid", None)
+                    story.pop("ralphRunTag", None)
                 elif new_status == "open":
                     story["startedAt"] = None
                     story["completedAt"] = None
@@ -1187,7 +1205,11 @@ for i in $(seq 1 "$MAX_ITERATIONS"); do
     log_error "ITERATION $i command failed (status=$CMD_STATUS)"
     HAS_ERROR="true"
   fi
-  if [ "$MODE" = "build" ] && [ "$CMD_STATUS" -eq 0 ] && grep -q "<promise>COMPLETE</promise>" "$LOG_FILE"; then
+  PROMISE_SIGNAL=""
+  if [ "$MODE" = "build" ] && [ "$CMD_STATUS" -eq 0 ]; then
+    PROMISE_SIGNAL="$(latest_promise_signal "$LOG_FILE")"
+  fi
+  if [ "$MODE" = "build" ] && [ "$CMD_STATUS" -eq 0 ] && [ "$PROMISE_SIGNAL" = "COMPLETE" ]; then
     BUILD_HEAD_AFTER="$(git_head)"
     if ! run_review_gate "$i" "$STORY_ID" "$STORY_TITLE" "$STORY_BLOCK" "$HEAD_BEFORE" "$BUILD_HEAD_AFTER" "$LOG_FILE" "$RUN_META"; then
       CMD_STATUS=1
@@ -1228,9 +1250,12 @@ for i in $(seq 1 "$MAX_ITERATIONS"); do
       log_error "ITERATION $i exited non-zero; review $LOG_FILE"
       update_story_status "$STORY_ID" "open"
       echo "Iteration failed; story reset to open."
-    elif grep -q "<promise>COMPLETE</promise>" "$LOG_FILE"; then
+    elif [ "$PROMISE_SIGNAL" = "COMPLETE" ]; then
       update_story_status "$STORY_ID" "done"
       echo "Completion signal received; story marked done."
+    elif [ "$PROMISE_SIGNAL" = "BLOCKED" ]; then
+      update_story_status "$STORY_ID" "blocked"
+      echo "Blocker signal received; story marked blocked."
     else
       update_story_status "$STORY_ID" "open"
       echo "No completion signal; story reset to open."

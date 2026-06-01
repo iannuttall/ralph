@@ -47,6 +47,7 @@ If the story details are empty or missing, STOP and report that the PRD story fo
 - Do NOT stage Ralph artifacts under `.ralph/` or `.agents/tasks/`.
 - Do NOT run broad staging commands such as `git add -A` or `git add .`.
 - Do NOT edit the PRD JSON (status is handled by the loop).
+- If acceptance criteria say to "open" a PR, treat an existing PR with the requested branch/title/body/files as satisfying that action when its state is OPEN or MERGED. Only CLOSED-unmerged fails unless the story explicitly says the PR must remain open.
 - Perform a final **security**, **performance**, and **regression** review of your changes before emitting the completion signal.
 
 ## Your Task (Do this in order)
@@ -99,7 +100,10 @@ Only output the completion signal when the **selected story** is fully complete 
 When the selected story is complete, output:
 <promise>COMPLETE</promise>
 
-Otherwise, end normally without the signal.
+If the selected story cannot be completed because external state or no-commit/no-push rules make the acceptance criteria impossible, record the blocker in the progress and errors logs, then output:
+<promise>BLOCKED</promise>
+
+Otherwise, end normally without a signal.
 
 ## Additional Guardrails
 - When authoring documentation, capture the why (tests + implementation intent).
