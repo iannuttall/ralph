@@ -57,6 +57,18 @@ function setupTempProject() {
   return base;
 }
 
+function setupStaleProject(overrides = {}) {
+  const base = setupTempProject();
+  const prdPath = path.join(base, ".agents", "tasks", "prd.json");
+  const prd = readJson(prdPath);
+  prd.stories[0].status = "in_progress";
+  prd.stories[0].startedAt = "2020-01-01T00:00:00+00:00";
+  prd.stories[0].updatedAt = "2020-01-01T00:00:00+00:00";
+  Object.assign(prd.stories[0], overrides);
+  writeFileSync(prdPath, `${JSON.stringify(prd, null, 2)}\n`);
+  return base;
+}
+
 function runReviewGateCase({ name, buildLines = [], reviewLines, expectedExit, expectedStoryStatus, env = {}, expectPrompt = false }) {
   const projectRoot = setupTempProject();
   const fakeBuild = path.join(projectRoot, "fake-build-agent.sh");
@@ -322,5 +334,95 @@ runGitGuardCase({
   ],
   expectedMessage: "broad git add is disabled",
 });
+
+{
+  const projectRoot = setupStaleProject();
+  const fakeBuild = path.join(projectRoot, "fake-build-agent.sh");
+  const fakeReview = path.join(projectRoot, "fake-review-agent.sh");
+  const prdPath = path.join(projectRoot, ".agents", "tasks", "prd.json");
+  writeFileSync(
+    fakeBuild,
+    [
+      "#!/usr/bin/env bash",
+      "cat >/dev/null",
+      "echo '<promise>COMPLETE</promise>'",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  writeFileSync(
+    fakeReview,
+    [
+      "#!/usr/bin/env bash",
+      "cat >/dev/null",
+      "echo '<review>MERGEABLE</review>'",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  try {
+    const result = spawnSync(process.execPath, [cliPath, "build", "1", "--prd", prdPath], {
+      cwd: projectRoot,
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        AGENT_CMD: fakeBuild,
+        REVIEW_CMD: fakeReview,
+      },
+    });
+    if (result.status !== 0) {
+      console.error(`Stale story reclaim failed: expected exit 0, got ${result.status}.`);
+      console.error(result.stdout);
+      console.error(result.stderr);
+      process.exit(1);
+    }
+    const story = readJson(prdPath).stories[0];
+    if (story.status !== "done") {
+      console.error(`Stale story reclaim failed: expected story done, got ${story.status}.`);
+      process.exit(1);
+    }
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
+}
+
+{
+  const projectRoot = setupStaleProject({ ralphRunPid: String(process.pid), ralphRunTag: "active-test" });
+  const fakeBuild = path.join(projectRoot, "fake-build-agent.sh");
+  const prdPath = path.join(projectRoot, ".agents", "tasks", "prd.json");
+  writeFileSync(
+    fakeBuild,
+    [
+      "#!/usr/bin/env bash",
+      "echo 'active owner should not run'",
+      "exit 1",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  try {
+    const result = spawnSync(process.execPath, [cliPath, "build", "1", "--prd", prdPath], {
+      cwd: projectRoot,
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        AGENT_CMD: fakeBuild,
+      },
+    });
+    if (result.status !== 0) {
+      console.error(`Active story owner failed: expected exit 0, got ${result.status}.`);
+      console.error(result.stdout);
+      console.error(result.stderr);
+      process.exit(1);
+    }
+    const story = readJson(prdPath).stories[0];
+    if (story.status !== "in_progress") {
+      console.error(`Active story owner failed: expected story in_progress, got ${story.status}.`);
+      process.exit(1);
+    }
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
+}
 
 console.log("Agent loop smoke tests passed.");

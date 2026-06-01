@@ -23,6 +23,6 @@
 # NO_COMMIT is always enforced as true; Ralph never creates commits.
 # NO_COMMIT=true
 # MAX_ITERATIONS=25
-# STALE_SECONDS=0
+# STALE_SECONDS=300
 # REVIEW_CMD="codex exec --yolo --skip-git-repo-check -m gpt-5.5 -c model_reasoning_effort=\"xhigh\" -c service_tier=\"priority\" -"
 # REVIEW_MAX_ROUNDS=3

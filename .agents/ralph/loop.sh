@@ -37,7 +37,7 @@ fi
 
 DEFAULT_MAX_ITERATIONS=25
 DEFAULT_NO_COMMIT=true
-DEFAULT_STALE_SECONDS=0
+DEFAULT_STALE_SECONDS=300
 DEFAULT_REVIEW_CMD="codex exec --yolo --skip-git-repo-check -m gpt-5.5 -c model_reasoning_effort=\"xhigh\" -c service_tier=\"priority\" -"
 DEFAULT_REVIEW_MAX_ROUNDS=3
 PRD_REQUEST_PATH=""
@@ -648,7 +648,7 @@ run_review_gate() {
 select_story() {
   local meta_out="$1"
   local block_out="$2"
-  python3 - "$PRD_PATH" "$meta_out" "$block_out" "$STALE_SECONDS" <<'PY'
+  python3 - "$PRD_PATH" "$meta_out" "$block_out" "$STALE_SECONDS" "$$" "$RUN_TAG" <<'PY'
 import json
 import os
 import sys
@@ -668,6 +668,8 @@ if len(sys.argv) > 4:
         stale_seconds = int(sys.argv[4])
     except Exception:
         stale_seconds = 0
+owner_pid = sys.argv[5] if len(sys.argv) > 5 else ""
+owner_run_tag = sys.argv[6] if len(sys.argv) > 6 else ""
 
 if not prd_path.exists():
     meta_out.write_text(json.dumps({"ok": False, "error": "PRD not found"}, indent=2) + "\n")
@@ -692,6 +694,23 @@ def parse_ts(value):
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+def pid_alive(value):
+    try:
+        pid = int(str(value).strip())
+    except Exception:
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
 
 with prd_path.open("r+", encoding="utf-8") as fh:
     if fcntl is not None:
@@ -725,12 +744,21 @@ with prd_path.open("r+", encoding="utf-8") as fh:
                     continue
                 if normalize_status(story.get("status")) != "in_progress":
                     continue
+                story_owner_pid = story.get("ralphRunPid")
+                if story_owner_pid:
+                    if pid_alive(story_owner_pid):
+                        continue
+                else:
+                    started = parse_ts(story.get("startedAt"))
+                    if started is not None and (now - started).total_seconds() <= stale_seconds:
+                        continue
                 started = parse_ts(story.get("startedAt"))
-                if started is None or (now - started).total_seconds() > stale_seconds:
-                    story["status"] = "open"
-                    story["startedAt"] = None
-                    story["completedAt"] = None
-                    story["updatedAt"] = now_iso()
+                story["status"] = "open"
+                story["startedAt"] = None
+                story["completedAt"] = None
+                story["updatedAt"] = now_iso()
+                story.pop("ralphRunPid", None)
+                story.pop("ralphRunTag", None)
 
         candidate = None
         for story in stories:
@@ -763,6 +791,8 @@ with prd_path.open("r+", encoding="utf-8") as fh:
                 candidate["startedAt"] = now_iso()
             candidate["completedAt"] = None
             candidate["updatedAt"] = now_iso()
+            candidate["ralphRunPid"] = owner_pid
+            candidate["ralphRunTag"] = owner_run_tag
             meta.update({
                 "id": candidate.get("id", ""),
                 "title": candidate.get("title", ""),
@@ -917,9 +947,13 @@ with prd_path.open("r+", encoding="utf-8") as fh:
                     story["completedAt"] = now_iso()
                     if not story.get("startedAt"):
                         story["startedAt"] = now_iso()
+                    story.pop("ralphRunPid", None)
+                    story.pop("ralphRunTag", None)
                 elif new_status == "open":
                     story["startedAt"] = None
                     story["completedAt"] = None
+                    story.pop("ralphRunPid", None)
+                    story.pop("ralphRunTag", None)
                 break
         fh.seek(0)
         fh.truncate()
@@ -1140,7 +1174,13 @@ for i in $(seq 1 "$MAX_ITERATIONS"); do
   unstage_ralph_artifacts
   set -e
   if [ "$CMD_STATUS" -eq 130 ] || [ "$CMD_STATUS" -eq 143 ]; then
-    echo "Interrupted."
+    if [ "$MODE" = "build" ] && [ -n "${STORY_ID:-}" ]; then
+      update_story_status "$STORY_ID" "open"
+      log_error "ITERATION $i interrupted; story reset to open"
+      echo "Interrupted; story reset to open."
+    else
+      echo "Interrupted."
+    fi
     exit "$CMD_STATUS"
   fi
   if [ "$CMD_STATUS" -ne 0 ]; then
