@@ -249,6 +249,9 @@ while [ $# -gt 0 ]; do
         shift
       elif [[ "$1" =~ ^[0-9]+$ ]]; then
         MAX_ITERATIONS="$1"
+        if [ "$MODE" = "review" ]; then
+          REVIEW_MAX_ROUNDS="$1"
+        fi
         shift
       else
         echo "Unknown arg: $1"
@@ -482,6 +485,27 @@ fi
 
 RUN_TAG="$(date +%Y%m%d-%H%M%S)-$$"
 
+render_template_file() {
+  local src="$1"
+  local dst="$2"
+  shift 2
+  python3 - "$src" "$dst" "$@" <<'PY'
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1]).read_text()
+dst = Path(sys.argv[2])
+pairs = sys.argv[3:]
+repl = {}
+for pair in pairs:
+    key, _, value = pair.partition("=")
+    repl[key] = value
+for key, value in repl.items():
+    src = src.replace("{{" + key + "}}", value)
+dst.write_text(src)
+PY
+}
+
 render_prompt() {
   local src="$1"
   local dst="$2"
@@ -551,6 +575,26 @@ for k, v in repl.items():
     src = src.replace("{{" + k + "}}", v)
 Path(sys.argv[2]).write_text(src)
 PY
+}
+
+render_branch_review_prompt() {
+  local dst="$1"
+  local round="$2"
+  local review_log="$3"
+  local branch="$4"
+  local base_ref="$5"
+  local base_sha="$6"
+  local head_sha="$7"
+  render_template_file "$PROMPT_REVIEW" "$dst" \
+    "REPO_ROOT=$ROOT_DIR" \
+    "REVIEW_LOG_PATH=$review_log" \
+    "REVIEW_REPORT_PATH=$REVIEW_REPORT_PATH" \
+    "BASE_REF=$base_ref" \
+    "BASE_SHA=$base_sha" \
+    "HEAD_SHA=$head_sha" \
+    "BRANCH=$branch" \
+    "ROUND=$round" \
+    "REVIEW_MAX_ROUNDS=$REVIEW_MAX_ROUNDS"
 }
 
 render_review_prompt() {
@@ -1298,8 +1342,47 @@ if [ "$MODE" = "review" ]; then
     write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" 0 "" "No reviewable branch diff"
     exit 1
   fi
-  echo "Review preflight passed for $BRANCH against $BASE_REF."
-  write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" 0 "" "Review loop not implemented yet"
+
+  FINAL_LOG=""
+  for round in $(seq 1 "$REVIEW_MAX_ROUNDS"); do
+    REVIEW_PROMPT="$TMP_DIR/review-prompt-$RUN_TAG-$round.md"
+    REVIEW_LOG="$RUNS_DIR/review-$RUN_TAG-round-$round.log"
+    FINAL_LOG="$REVIEW_LOG"
+    HEAD_SHA="$(git_head)"
+    render_branch_review_prompt "$REVIEW_PROMPT" "$round" "$REVIEW_LOG" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$HEAD_SHA"
+    log_activity "REVIEW round $round start (branch=$BRANCH base=$BASE_REF)"
+    set +e
+    if [ "${RALPH_DRY_RUN:-}" = "1" ]; then
+      echo "[RALPH_DRY_RUN] Skipping review agent." | tee "$REVIEW_LOG"
+      REVIEW_STATUS=0
+    else
+      require_agent "$REVIEW_CMD"
+      run_review_agent "$REVIEW_PROMPT" 2>&1 | tee "$REVIEW_LOG"
+      REVIEW_STATUS=${PIPESTATUS[0]}
+    fi
+    set -e
+    unstage_ralph_artifacts
+    log_activity "REVIEW round $round end (status=$REVIEW_STATUS log=$REVIEW_LOG)"
+    if [ "$REVIEW_STATUS" -ne 0 ]; then
+      write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$round" "$REVIEW_LOG" "Review command failed"
+      echo "Review command failed. Report: $REVIEW_REPORT_PATH"
+      exit 1
+    fi
+    REVIEW_SIGNAL="$(latest_review_signal "$REVIEW_LOG")"
+    if [ "$REVIEW_SIGNAL" = "MERGEABLE" ]; then
+      write_review_report "MERGEABLE" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$round" "$REVIEW_LOG" ""
+      echo "Ralph review mergeable. Report: $REVIEW_REPORT_PATH"
+      exit 0
+    fi
+    if [ "$REVIEW_SIGNAL" = "BLOCKED" ]; then
+      write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$round" "$REVIEW_LOG" "Review did not reach mergeable verdict"
+      echo "Ralph review blocked. Report: $REVIEW_REPORT_PATH"
+      exit 1
+    fi
+  done
+
+  write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$REVIEW_MAX_ROUNDS" "$FINAL_LOG" "Review did not return a final signal"
+  echo "Ralph review blocked. Report: $REVIEW_REPORT_PATH"
   exit 1
 fi
 

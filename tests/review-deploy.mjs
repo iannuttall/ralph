@@ -183,4 +183,78 @@ function assertReport(root, reportPath, expected) {
   }
 }
 
+{
+  const root = setupReviewProject();
+  const { fakeReview, promptPath } = writeFakeReview(root, ["echo '<review>MERGEABLE</review>'"]);
+  try {
+    const result = runRalph(root, ["review", "1"], { REVIEW_CMD: fakeReview });
+    requireStatus("review mergeable", result, 0);
+    if (!existsSync(promptPath)) {
+      console.error("review mergeable failed: prompt was not captured.");
+      process.exit(1);
+    }
+    const prompt = readFileSync(promptPath, "utf-8");
+    for (const text of [
+      "$use-gpt55-subagents",
+      "$superpowers:requesting-code-review",
+      "$superpowers:receiving-code-review",
+      "<review>MERGEABLE</review>",
+    ]) {
+      requireIncludes("review prompt", prompt, text);
+    }
+    assertReport(root, path.join(root, ".ralph", "review-report.md"), [
+      "Final verdict: MERGEABLE",
+      "Command: ralph review",
+      "app.txt",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = setupReviewProject();
+  const { fakeReview } = writeFakeReview(root, ["echo '<review>BLOCKED</review>'"]);
+  try {
+    const result = runRalph(root, ["review", "1"], { REVIEW_CMD: fakeReview });
+    requireStatus("review blocked", result, 1);
+    assertReport(root, path.join(root, ".ralph", "review-report.md"), [
+      "Final verdict: BLOCKED",
+      "Review did not reach mergeable verdict",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = setupReviewProject();
+  const { fakeReview } = writeFakeReview(root, ["echo 'review complete but no signal'"]);
+  try {
+    const result = runRalph(root, ["review", "1"], { REVIEW_CMD: fakeReview });
+    requireStatus("review no signal", result, 1);
+    assertReport(root, path.join(root, ".ralph", "review-report.md"), [
+      "Final verdict: BLOCKED",
+      "Review did not return a final signal",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = setupReviewProject();
+  const { fakeReview } = writeFakeReview(root, ["echo '<review>MERGEABLE</review>'", "exit 2"]);
+  try {
+    const result = runRalph(root, ["review", "1"], { REVIEW_CMD: fakeReview });
+    requireStatus("review nonzero", result, 1);
+    assertReport(root, path.join(root, ".ralph", "review-report.md"), [
+      "Final verdict: BLOCKED",
+      "Review command failed",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 console.log("Review/deploy smoke tests passed.");
