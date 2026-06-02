@@ -126,6 +126,17 @@ function assertReport(root, reportPath, expected) {
 }
 
 {
+  const root = mkdtempSync(path.join(tmpdir(), "ralph-review-"));
+  try {
+    const result = runRalph(root, ["review", "--base"]);
+    requireStatus("cli missing base value", result, 1);
+    requireIncludes("cli missing base value", `${result.stdout}\n${result.stderr}`, "Missing value for --base");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
   const root = setupReviewProject({ branch: null, diff: false });
   try {
     const result = runRalph(root, ["review"]);
