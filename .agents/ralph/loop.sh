@@ -223,6 +223,10 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --base)
+      if [ "$#" -lt 2 ] || [[ "${2:-}" == --* ]]; then
+        echo "Missing value for --base" >&2
+        exit 1
+      fi
       REVIEW_BASE_REF="$2"
       DEPLOY_BASE_REF="$2"
       shift 2
@@ -1143,7 +1147,10 @@ current_branch() {
 
 assert_named_branch() {
   local branch
-  branch="$(current_branch)"
+  branch="${1:-}"
+  if [ -z "$branch" ]; then
+    branch="$(current_branch)"
+  fi
   if [ -z "$branch" ]; then
     echo "Refusing to run on detached HEAD." >&2
     return 1
@@ -1277,8 +1284,9 @@ write_review_report() {
 
 if [ "$MODE" = "review" ]; then
   mkdir -p "$(dirname "$REVIEW_REPORT_PATH")" "$TMP_DIR" "$RUNS_DIR"
-  BRANCH="$(assert_named_branch)" || {
-    write_review_report "BLOCKED" "" "" "" "$(git_head)" 0 "" "Protected branch or detached HEAD"
+  CURRENT_BRANCH="$(current_branch)"
+  BRANCH="$(assert_named_branch "$CURRENT_BRANCH")" || {
+    write_review_report "BLOCKED" "$CURRENT_BRANCH" "" "" "$(git_head)" 0 "" "Protected branch or detached HEAD"
     exit 1
   }
   BASE_REF="$(resolve_review_base_ref)" || {

@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 
 const repoRoot = path.resolve(new URL("..", import.meta.url).pathname);
 const cliPath = path.join(repoRoot, "bin", "ralph");
+const loopPath = path.join(repoRoot, ".agents", "ralph", "loop.sh");
 
 function run(cmd, args, options = {}) {
   const result = spawnSync(cmd, args, { encoding: "utf-8", ...options });
@@ -42,7 +43,7 @@ function initGit(cwd) {
 function commitAll(cwd, message) {
   for (const args of [
     ["add", "."],
-    ["commit", "-m", message],
+    ["-c", "core.hooksPath=/dev/null", "commit", "-m", message],
   ]) {
     const result = spawnSync("git", args, { cwd, stdio: "inherit" });
     if (result.status !== 0) process.exit(result.status ?? 1);
@@ -92,6 +93,18 @@ function runRalph(root, args, env = {}) {
   });
 }
 
+function runLoop(root, args, env = {}) {
+  return run(loopPath, args, {
+    cwd: root,
+    env: {
+      ...process.env,
+      RALPH_ROOT: root,
+      RALPH_SKIP_UPDATE_CHECK: "1",
+      ...env,
+    },
+  });
+}
+
 function assertReport(root, reportPath, expected) {
   if (!existsSync(reportPath)) {
     console.error(`Missing report: ${reportPath}`);
@@ -102,11 +115,23 @@ function assertReport(root, reportPath, expected) {
 }
 
 {
+  const root = mkdtempSync(path.join(tmpdir(), "ralph-review-"));
+  try {
+    const result = runLoop(root, ["review", "--base"]);
+    requireStatus("loop missing base value", result, 1);
+    requireIncludes("loop missing base value", `${result.stdout}\n${result.stderr}`, "Missing value for --base");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
   const root = setupReviewProject({ branch: null, diff: false });
   try {
     const result = runRalph(root, ["review"]);
     requireStatus("review refuses main", result, 1);
     requireIncludes("review refuses main", `${result.stdout}\n${result.stderr}`, "Refusing to run on protected branch: main");
+    assertReport(root, path.join(root, ".ralph", "review-report.md"), ["- Branch: main"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
