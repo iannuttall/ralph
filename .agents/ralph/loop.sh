@@ -1293,7 +1293,9 @@ write_review_report() {
   local review_log="$7"
   local blocker="$8"
   local changed_files
+  local uncommitted_files
   changed_files="$(git -C "$ROOT_DIR" diff --name-only "$base_sha"..HEAD 2>/dev/null | sed 's/^/- /' || true)"
+  uncommitted_files="$(git_dirty_files)"
   {
     echo "# Ralph Review Report"
     echo ""
@@ -1310,6 +1312,13 @@ write_review_report() {
     echo "## Changed Files Reviewed"
     if [ -n "$changed_files" ]; then
       echo "$changed_files"
+    else
+      echo "- (none)"
+    fi
+    echo ""
+    echo "## Uncommitted Changes"
+    if [ -n "$uncommitted_files" ]; then
+      echo "$uncommitted_files"
     else
       echo "- (none)"
     fi

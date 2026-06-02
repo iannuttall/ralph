@@ -2,8 +2,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
-const repoRoot = path.resolve(new URL("..", import.meta.url).pathname);
+const repoRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const cliPath = path.join(repoRoot, "bin", "ralph");
 const loopPath = path.join(repoRoot, ".agents", "ralph", "loop.sh");
 
@@ -114,6 +115,23 @@ function assertReport(root, reportPath, expected) {
   for (const text of expected) requireIncludes("report", report, text);
 }
 
+function assertReportSectionIncludes(root, reportPath, section, expected) {
+  if (!existsSync(reportPath)) {
+    console.error(`Missing report: ${reportPath}`);
+    process.exit(1);
+  }
+  const report = readFileSync(reportPath, "utf-8");
+  const sectionStart = report.indexOf(section);
+  if (sectionStart === -1) {
+    console.error(`report failed: missing section ${JSON.stringify(section)}.`);
+    console.error(report);
+    process.exit(1);
+  }
+  const nextSection = report.indexOf("\n## ", sectionStart + section.length);
+  const sectionText = report.slice(sectionStart, nextSection === -1 ? undefined : nextSection);
+  requireIncludes("report section", sectionText, expected);
+}
+
 {
   const root = mkdtempSync(path.join(tmpdir(), "ralph-review-"));
   try {
@@ -207,6 +225,26 @@ function assertReport(root, reportPath, expected) {
       "Command: ralph review",
       "app.txt",
     ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = setupReviewProject();
+  const { fakeReview } = writeFakeReview(root, [
+    "printf 'review fix\\n' > review-fix.txt",
+    "echo '<review>MERGEABLE</review>'",
+  ]);
+  try {
+    const result = runRalph(root, ["review", "1"], { REVIEW_CMD: fakeReview });
+    requireStatus("review mergeable with uncommitted file", result, 0);
+    assertReportSectionIncludes(
+      root,
+      path.join(root, ".ralph", "review-report.md"),
+      "## Uncommitted Changes",
+      "- review-fix.txt",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
