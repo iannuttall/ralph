@@ -187,12 +187,14 @@ run_review_agent() {
     escaped=$(printf '%q' "$prompt_file")
     local cmd="${REVIEW_CMD//\{prompt\}/$escaped}"
     (
+      cd "$ROOT_DIR"
       export PATH="$GIT_GUARD_DIR:$PATH"
       export RALPH_REAL_GIT="$REAL_GIT_BIN"
       eval "$cmd"
     )
   else
     (
+      cd "$ROOT_DIR"
       export PATH="$GIT_GUARD_DIR:$PATH"
       export RALPH_REAL_GIT="$REAL_GIT_BIN"
       cat "$prompt_file" | eval "$REVIEW_CMD"
@@ -1485,11 +1487,25 @@ push_current_branch() {
 
 create_pr_to_main() {
   local branch="$1"
+  local branch_type="${branch%%/*}"
+  local title_type
+  case "$branch_type" in
+    feat|feature)
+      title_type="feature"
+      ;;
+    fix|refactor|chore|hotfix)
+      title_type="$branch_type"
+      ;;
+    *)
+      title_type="chore"
+      ;;
+  esac
   local title
   title="$(printf '%s' "$branch" | sed 's#^[^/]*/##; s/-/ /g; s/_/ /g')"
   if [ -z "$title" ]; then
     title="Ralph deploy"
   fi
+  title="[$title_type] $title"
   local body
   body="$(cat <<'EOF'
 ## Summary
@@ -1526,14 +1542,31 @@ try:
 except Exception:
     runs = []
 head_sha = sys.argv[2]
+has_head_sha = any(run.get("headSha") for run in runs)
+if head_sha and has_head_sha:
+    relevant = [run for run in runs if str(run.get("headSha") or "") == head_sha]
+elif not has_head_sha:
+    relevant = runs
+else:
+    relevant = []
+
+failure = {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "red"}
+pending = {"queued", "waiting", "requested", "in_progress", "pending", "unknown", ""}
+
 selected = None
-if head_sha:
-    for run in runs:
-        if str(run.get("headSha") or "") == head_sha:
+for run in relevant:
+    value = str(run.get("conclusion") or run.get("status") or "").lower()
+    if value in failure:
+        selected = run
+        break
+if selected is None:
+    for run in relevant:
+        value = str(run.get("conclusion") or run.get("status") or "").lower()
+        if value in pending:
             selected = run
             break
-if selected is None and runs and not any(run.get("headSha") for run in runs):
-    selected = runs[0]
+if selected is None and relevant:
+    selected = relevant[0]
 if selected:
     print(selected.get("databaseId", ""))
 PY
@@ -1553,28 +1586,27 @@ try:
 except Exception:
     runs = []
 head_sha = sys.argv[2]
-selected = None
-if head_sha:
-    for run in runs:
-        if str(run.get("headSha") or "") == head_sha:
-            selected = run
-            break
-if selected is None and runs and not any(run.get("headSha") for run in runs):
-    selected = runs[0]
-if selected is None:
+has_head_sha = any(run.get("headSha") for run in runs)
+if head_sha and has_head_sha:
+    relevant = [run for run in runs if str(run.get("headSha") or "") == head_sha]
+elif not has_head_sha:
+    relevant = runs
+else:
+    relevant = []
+
+if not relevant:
     print("unknown")
     raise SystemExit
 
-run = selected
-value = str(run.get("conclusion") or run.get("status") or "unknown").lower()
-if value in {"success", "green"}:
-    print("green")
-elif value in {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "red"}:
+values = [str(run.get("conclusion") or run.get("status") or "unknown").lower() for run in relevant]
+if any(value in {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "red"} for value in values):
     print("red")
-elif value in {"queued", "waiting", "requested", "in_progress", "pending"}:
+elif any(value in {"queued", "waiting", "requested", "in_progress", "pending"} for value in values):
     print("pending")
+elif all(value in {"success", "green"} for value in values):
+    print("green")
 else:
-    print(value or "unknown")
+    print("unknown")
 PY
 }
 
