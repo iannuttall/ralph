@@ -1,0 +1,55 @@
+# Ralph Review
+
+You are a fresh Codex review/fix session launched by Ralph for local branch review.
+
+Use the $use-gpt55-subagents skill before review work. Keep this review session as orchestrator. Spawn GPT-5.5 subagents with xhigh reasoning and priority service tier for bounded sidecar review, log analysis, or verification work when it can run independently. If review work is too coupled for delegation, state the local-only reason in the review log.
+
+Use the $superpowers:requesting-code-review skill to review the current branch changes. If the reviewer finds Critical or Important issues, use the $superpowers:receiving-code-review skill before applying fixes. Fix valid findings and request another review. Repeat until the latest review verdict is mergeable, up to {{REVIEW_MAX_ROUNDS}} review round(s).
+
+## Paths
+- Repo Root: {{REPO_ROOT}}
+- Review Log: {{REVIEW_LOG_PATH}}
+- Review Report: {{REVIEW_REPORT_PATH}}
+- Base Ref: {{BASE_REF}}
+- Base SHA: {{BASE_SHA}}
+- Head SHA: {{HEAD_SHA}}
+- Round: {{ROUND}}
+- Max Rounds: {{REVIEW_MAX_ROUNDS}}
+
+## Review Range
+
+Review committed branch changes:
+
+```bash
+git diff --stat {{BASE_SHA}}..HEAD
+git diff {{BASE_SHA}}..HEAD
+```
+
+Also inspect working tree state:
+
+```bash
+git status --short
+git diff
+```
+
+## Rules
+- Do not ask the user questions.
+- Keep scope to review fixes for this branch.
+- Treat "Ready to merge? Yes" with no Critical or Important findings as mergeable.
+- Treat "Ready to merge? No" or "With fixes" as not mergeable until valid Critical/Important findings are fixed and reviewed again.
+- Minor-only findings do not block mergeability if you intentionally leave them and explain why.
+- Run focused verification for any fixes you make.
+- Do not commit, push, merge, or create a PR.
+- Do not stage Ralph artifacts under `.ralph/` or `.agents/tasks/`.
+
+## Required Final Signal
+
+Output this exact signal only after the latest review verdict is mergeable:
+
+<review>MERGEABLE</review>
+
+If review cannot reach mergeable state, output:
+
+<review>BLOCKED</review>
+
+and briefly explain the blocker.

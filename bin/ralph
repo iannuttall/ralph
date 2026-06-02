@@ -17,6 +17,8 @@ let installForce = false;
 let prdPath = null;
 let progressPath = null;
 let prdOutPath = null;
+let baseRefOverride = null;
+let skipReview = false;
 
 function exists(p) {
   try {
@@ -76,6 +78,8 @@ Commands:
   ping                                Minimal agent health check
   log "<message>"                     Append to .ralph/activity.log
   build [n] [--no-commit]             Run build loop (Ralph never commits)
+  review [n] [--base ref]             Review current branch until mergeable
+  deploy [n] [--base ref]             Create PR to main and repair CI until green
   overview                            Render a human overview from PRD JSON
   help                                Show this message
 
@@ -83,6 +87,8 @@ Options:
   --prd <path>                        Override PRD path
   --out <path>                        Override PRD output path (prd command)
   --progress <path>                   Override progress log path
+  --base <ref>                        Override review/deploy base ref
+  --skip-review                       For deploy only: skip the pre-deploy review loop
   --agent <codex|claude|droid|opencode>  Override agent runner
 
 Notes:
@@ -178,6 +184,19 @@ for (let i = 0; i < rawArgs.length; i += 1) {
   if (arg === "--progress") {
     progressPath = rawArgs[i + 1];
     i += 1;
+    continue;
+  }
+  if (arg.startsWith("--base=")) {
+    baseRefOverride = arg.split("=").slice(1).join("=");
+    continue;
+  }
+  if (arg === "--base") {
+    baseRefOverride = rawArgs[i + 1];
+    i += 1;
+    continue;
+  }
+  if (arg === "--skip-review") {
+    skipReview = true;
     continue;
   }
   args.push(arg);
@@ -428,12 +447,21 @@ async function main() {
     process.env.AGENT_CMD = mapped;
   }
   const env = { ...process.env, RALPH_ROOT: cwd };
+  if (baseRefOverride) {
+    env.REVIEW_BASE_REF = baseRefOverride;
+    env.DEPLOY_BASE_REF = baseRefOverride;
+  }
+  if (skipReview) {
+    env.DEPLOY_SKIP_REVIEW = "1";
+  }
   if (!env.ACTIVITY_CMD) {
     env.ACTIVITY_CMD = "ralph log";
   }
   if (progressPath) env.PROGRESS_PATH = progressPath;
   if (templateDir === globalDir) {
     env.PROMPT_BUILD = path.join(templateDir, "PROMPT_build.txt");
+    env.PROMPT_REVIEW = path.join(templateDir, "PROMPT_review.txt");
+    env.PROMPT_DEPLOY_FIX = path.join(templateDir, "PROMPT_deploy_fix.txt");
     env.GUARDRAILS_REF = path.join(templateDir, "references", "GUARDRAILS.md");
     env.CONTEXT_REF = path.join(templateDir, "references", "CONTEXT_ENGINEERING.md");
   }

@@ -20,9 +20,18 @@
 # AGENT_CMD="droid exec --skip-permissions-unsafe -f {prompt}"
 # AGENTS_PATH="AGENTS.md"
 # PROMPT_BUILD=".agents/ralph/PROMPT_build.txt"
+# PROMPT_REVIEW=".agents/ralph/PROMPT_review.txt"
+# PROMPT_DEPLOY_FIX=".agents/ralph/PROMPT_deploy_fix.txt"
 # NO_COMMIT is always enforced as true; Ralph never creates commits.
 # NO_COMMIT=true
 # MAX_ITERATIONS=25
 # STALE_SECONDS=300
 # REVIEW_CMD="codex exec --yolo --skip-git-repo-check -m gpt-5.5 -c model_reasoning_effort=\"xhigh\" -c service_tier=\"priority\" -"
-# REVIEW_MAX_ROUNDS=3
+# DEPLOY_FIX_CMD="codex exec --yolo --skip-git-repo-check -m gpt-5.5 -c model_reasoning_effort=\"xhigh\" -c service_tier=\"priority\" -"
+# REVIEW_MAX_ROUNDS=25
+# DEPLOY_MAX_ROUNDS=25
+# REVIEW_REPORT_PATH=".ralph/review-report.md"
+# DEPLOY_REPORT_PATH=".ralph/deploy-report.md"
+# REVIEW_BASE_REF=""
+# DEPLOY_BASE_REF="main"
+# DEPLOY_SKIP_REVIEW=0
