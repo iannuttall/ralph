@@ -218,8 +218,17 @@ run_agent_inline() {
 MODE="build"
 while [ $# -gt 0 ]; do
   case "$1" in
-    build|prd)
+    build|prd|review|deploy)
       MODE="$1"
+      shift
+      ;;
+    --base)
+      REVIEW_BASE_REF="$2"
+      DEPLOY_BASE_REF="$2"
+      shift 2
+      ;;
+    --skip-review)
+      DEPLOY_SKIP_REVIEW=1
       shift
       ;;
     --prompt)
@@ -246,7 +255,19 @@ while [ $# -gt 0 ]; do
 done
 NO_COMMIT=true
 
-PROMPT_FILE="$PROMPT_BUILD"
+case "$MODE" in
+  build)
+    PROMPT_FILE="$PROMPT_BUILD"
+    ;;
+  review)
+    PROMPT_FILE="$PROMPT_REVIEW"
+    MAX_ITERATIONS="$REVIEW_MAX_ROUNDS"
+    ;;
+  deploy)
+    PROMPT_FILE="$PROMPT_DEPLOY_FIX"
+    MAX_ITERATIONS="$DEPLOY_MAX_ROUNDS"
+    ;;
+esac
 
 if [ "$MODE" = "prd" ]; then
   PRD_USE_INLINE=1
@@ -317,7 +338,7 @@ if [ "$MODE" = "prd" ]; then
   exit 0
 fi
 
-if [ "${RALPH_DRY_RUN:-}" != "1" ]; then
+if [ "${RALPH_DRY_RUN:-}" != "1" ] && [ "$MODE" = "build" ]; then
   require_agent
 fi
 
@@ -326,7 +347,7 @@ if [ ! -f "$PROMPT_FILE" ]; then
   exit 1
 fi
 
-if [ "$MODE" != "prd" ] && [ ! -f "$PRD_PATH" ]; then
+if [ "$MODE" = "build" ] && [ ! -f "$PRD_PATH" ]; then
   echo "PRD not found: $PRD_PATH"
   exit 1
 fi
@@ -1116,6 +1137,65 @@ git_head() {
   fi
 }
 
+current_branch() {
+  git -C "$ROOT_DIR" branch --show-current 2>/dev/null || true
+}
+
+assert_named_branch() {
+  local branch
+  branch="$(current_branch)"
+  if [ -z "$branch" ]; then
+    echo "Refusing to run on detached HEAD." >&2
+    return 1
+  fi
+  case "$branch" in
+    main|master|staging)
+      echo "Refusing to run on protected branch: $branch" >&2
+      return 1
+      ;;
+  esac
+  echo "$branch"
+}
+
+resolve_review_base_ref() {
+  if [ -n "$REVIEW_BASE_REF" ]; then
+    if git -C "$ROOT_DIR" rev-parse --verify "$REVIEW_BASE_REF" >/dev/null 2>&1; then
+      echo "$REVIEW_BASE_REF"
+      return 0
+    fi
+    echo "Base ref not found: $REVIEW_BASE_REF" >&2
+    return 1
+  fi
+  if git -C "$ROOT_DIR" show-ref --verify refs/heads/main >/dev/null 2>&1; then
+    echo "main"
+    return 0
+  fi
+  if git -C "$ROOT_DIR" show-ref --verify refs/remotes/origin/main >/dev/null 2>&1; then
+    echo "origin/main"
+    return 0
+  fi
+  echo "Base ref not found: main or origin/main" >&2
+  return 1
+}
+
+merge_base_sha() {
+  local base_ref="$1"
+  git -C "$ROOT_DIR" merge-base HEAD "$base_ref" 2>/dev/null || true
+}
+
+assert_reviewable_diff() {
+  local base_sha="$1"
+  if [ -z "$base_sha" ]; then
+    echo "Could not determine merge base."
+    return 1
+  fi
+  if git -C "$ROOT_DIR" diff --quiet "$base_sha"..HEAD; then
+    echo "No reviewable branch diff against base."
+    return 1
+  fi
+  return 0
+}
+
 git_commit_list() {
   local before="$1"
   local after="$2"
@@ -1151,6 +1231,69 @@ git_dirty_files() {
     echo ""
   fi
 }
+
+write_review_report() {
+  local verdict="$1"
+  local branch="$2"
+  local base_ref="$3"
+  local base_sha="$4"
+  local head_sha="$5"
+  local rounds_run="$6"
+  local review_log="$7"
+  local blocker="$8"
+  local changed_files
+  changed_files="$(git -C "$ROOT_DIR" diff --name-only "$base_sha"..HEAD 2>/dev/null | sed 's/^/- /' || true)"
+  {
+    echo "# Ralph Review Report"
+    echo ""
+    echo "- Command: ralph review"
+    echo "- Branch: $branch"
+    echo "- Base ref: $base_ref"
+    echo "- Base SHA: $base_sha"
+    echo "- Head SHA: $head_sha"
+    echo "- Max rounds: $REVIEW_MAX_ROUNDS"
+    echo "- Rounds run: $rounds_run"
+    echo "- Final verdict: $verdict"
+    echo "- Final review log: $review_log"
+    echo ""
+    echo "## Changed Files Reviewed"
+    if [ -n "$changed_files" ]; then
+      echo "$changed_files"
+    else
+      echo "- (none)"
+    fi
+    echo ""
+    echo "## Verification"
+    echo "- See review log: $review_log"
+    echo ""
+    echo "## Blockers"
+    if [ -n "$blocker" ]; then
+      echo "- $blocker"
+    else
+      echo "- (none)"
+    fi
+  } > "$REVIEW_REPORT_PATH"
+}
+
+if [ "$MODE" = "review" ]; then
+  mkdir -p "$(dirname "$REVIEW_REPORT_PATH")" "$TMP_DIR" "$RUNS_DIR"
+  BRANCH="$(assert_named_branch)" || {
+    write_review_report "BLOCKED" "" "" "" "$(git_head)" 0 "" "Protected branch or detached HEAD"
+    exit 1
+  }
+  BASE_REF="$(resolve_review_base_ref)" || {
+    write_review_report "BLOCKED" "$BRANCH" "" "" "$(git_head)" 0 "" "Base ref not found"
+    exit 1
+  }
+  BASE_SHA="$(merge_base_sha "$BASE_REF")"
+  if ! assert_reviewable_diff "$BASE_SHA"; then
+    write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" 0 "" "No reviewable branch diff"
+    exit 1
+  fi
+  echo "Review preflight passed for $BRANCH against $BASE_REF."
+  write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" 0 "" "Review loop not implemented yet"
+  exit 1
+fi
 
 echo "Ralph mode: $MODE"
 echo "Max iterations: $MAX_ITERATIONS"
