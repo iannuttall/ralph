@@ -188,6 +188,10 @@ for (let i = 0; i < rawArgs.length; i += 1) {
   }
   if (arg.startsWith("--base=")) {
     baseRefOverride = arg.split("=").slice(1).join("=");
+    if (!baseRefOverride) {
+      console.error("Missing value for --base");
+      process.exit(1);
+    }
     continue;
   }
   if (arg === "--base") {
