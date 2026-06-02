@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -76,8 +76,10 @@ function setupReviewProject({ branch = "feature/review", diff = true } = {}) {
 }
 
 function writeFakeReview(root, lines = ["echo '<review>MERGEABLE</review>'"]) {
-  const promptPath = path.join(root, "review-prompt.md");
-  const fakeReview = path.join(root, "fake-review-agent.sh");
+  const fakeRoot = path.join(root, ".ralph", "test");
+  mkdirSync(fakeRoot, { recursive: true });
+  const promptPath = path.join(fakeRoot, "review-prompt.md");
+  const fakeReview = path.join(fakeRoot, "fake-review-agent.sh");
   writeFileSync(
     fakeReview,
     [
@@ -89,6 +91,58 @@ function writeFakeReview(root, lines = ["echo '<review>MERGEABLE</review>'"]) {
     { mode: 0o755 },
   );
   return { fakeReview, promptPath };
+}
+
+function writeFakeGh(root) {
+  const fakeBin = path.join(root, ".ralph", "fakebin");
+  const logPath = path.join(root, ".ralph", "gh.log");
+  const fakePrUrl = "https://github.example.com/owner/repo/pull/123";
+  const fakeGh = path.join(fakeBin, "gh");
+  mkdirSync(fakeBin, { recursive: true });
+  writeFileSync(
+    fakeGh,
+    [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      `printf '%s\\n' "$*" >> ${JSON.stringify(logPath)}`,
+      'if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then',
+      "  echo 'Logged in to github.com'",
+      "  exit 0",
+      "fi",
+      'if [ "${1:-}" = "pr" ] && [ "${2:-}" = "create" ]; then',
+      `  echo ${JSON.stringify(fakePrUrl)}`,
+      "  exit 0",
+      "fi",
+      'if [ "${1:-}" = "run" ]; then',
+      "  echo '[]'",
+      "  exit 0",
+      "fi",
+      'echo "unsupported fake gh: $*" >&2',
+      "exit 1",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return { fakeBin, logPath, fakePrUrl };
+}
+
+function makeBranchPushable(root) {
+  const remote = mkdtempSync(path.join(tmpdir(), "ralph-origin-"));
+  rmSync(remote, { recursive: true, force: true });
+  const currentBranch = spawnSync("git", ["branch", "--show-current"], {
+    cwd: root,
+    encoding: "utf-8",
+  }).stdout.trim();
+  for (const args of [
+    ["init", "--bare", "-b", "main", remote],
+    ["remote", "add", "origin", remote],
+    ["push", "origin", "main"],
+    ["push", "-u", "origin", currentBranch],
+  ]) {
+    const result = spawnSync("git", args, { cwd: root, stdio: "inherit" });
+    if (result.status !== 0) process.exit(result.status ?? 1);
+  }
+  return remote;
 }
 
 function runRalph(root, args, env = {}) {
@@ -148,6 +202,45 @@ function assertReportSectionIncludes(root, reportPath, section, expected) {
     requireIncludes("loop missing base value", `${result.stdout}\n${result.stderr}`, "Missing value for --base");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = setupReviewProject();
+  try {
+    const result = runRalph(root, ["deploy", "1", "--skip-review"], { PATH: "/usr/bin:/bin" });
+    requireStatus("deploy requires gh", result, 1);
+    requireIncludes("deploy requires gh", `${result.stdout}\n${result.stderr}`, "GitHub CLI not found");
+    assertReport(root, path.join(root, ".ralph", "deploy-report.md"), [
+      "Final verdict: BLOCKED",
+      "GitHub CLI not found",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = setupReviewProject();
+  const remote = makeBranchPushable(root);
+  const { fakeReview } = writeFakeReview(root, ["echo '<review>MERGEABLE</review>'"]);
+  const { fakeBin, logPath, fakePrUrl } = writeFakeGh(root);
+  try {
+    const result = runRalph(root, ["deploy", "1"], {
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      REVIEW_CMD: fakeReview,
+    });
+    requireStatus("deploy creates PR", result, 0);
+    const ghLog = readFileSync(logPath, "utf-8");
+    requireIncludes("gh log", ghLog, "auth status");
+    requireIncludes("gh log", ghLog, "pr create");
+    assertReport(root, path.join(root, ".ralph", "deploy-report.md"), [
+      "Final verdict: CI_GREEN",
+      fakePrUrl,
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
   }
 }
 

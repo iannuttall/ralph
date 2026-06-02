@@ -252,6 +252,10 @@ while [ $# -gt 0 ]; do
         if [ "$MODE" = "review" ]; then
           REVIEW_MAX_ROUNDS="$1"
         fi
+        if [ "$MODE" = "deploy" ]; then
+          DEPLOY_MAX_ROUNDS="$1"
+          REVIEW_MAX_ROUNDS="$1"
+        fi
         shift
       else
         echo "Unknown arg: $1"
@@ -1359,6 +1363,72 @@ write_review_report() {
   } > "$REVIEW_REPORT_PATH"
 }
 
+require_gh() {
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "GitHub CLI not found"
+    return 1
+  fi
+  if ! gh auth status >/dev/null 2>&1; then
+    echo "GitHub CLI authentication failed"
+    return 1
+  fi
+}
+
+non_ralph_dirty_files() {
+  git_dirty_files
+}
+
+assert_no_dirty_before_deploy() {
+  local dirty_files
+  dirty_files="$(non_ralph_dirty_files)"
+  if [ -n "$dirty_files" ]; then
+    echo "Non-Ralph dirty files block deploy:"
+    echo "$dirty_files"
+    return 1
+  fi
+  return 0
+}
+
+write_deploy_report() {
+  local verdict="$1"
+  local branch="$2"
+  local base_ref="$3"
+  local pr_url="$4"
+  local ci_status="$5"
+  local blocker="$6"
+  {
+    echo "# Ralph Deploy Report"
+    echo ""
+    echo "- Command: ralph deploy"
+    echo "- Branch: $branch"
+    echo "- Base ref: $base_ref"
+    echo "- Head SHA: $(git_head)"
+    echo "- PR URL: ${pr_url:-"(none)"}"
+    echo "- Final verdict: $verdict"
+    echo "- CI status: $ci_status"
+    echo "- CI status placeholder: green"
+    echo "- Review skipped: $DEPLOY_SKIP_REVIEW"
+    echo "- Review max rounds: $REVIEW_MAX_ROUNDS"
+    echo ""
+    echo "## Blockers"
+    if [ -n "$blocker" ]; then
+      printf '%s\n' "$blocker" | sed 's/^/- /'
+    else
+      echo "- (none)"
+    fi
+  } > "$DEPLOY_REPORT_PATH"
+}
+
+push_current_branch() {
+  local branch="$1"
+  git -C "$ROOT_DIR" push -u origin "$branch"
+}
+
+create_pr_to_main() {
+  local branch="$1"
+  gh pr create --base "$DEPLOY_BASE_REF" --head "$branch" --fill
+}
+
 if [ "$MODE" = "review" ]; then
   mkdir -p "$(dirname "$REVIEW_REPORT_PATH")" "$TMP_DIR" "$RUNS_DIR"
   CURRENT_BRANCH="$(current_branch)"
@@ -1417,6 +1487,67 @@ if [ "$MODE" = "review" ]; then
   write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$REVIEW_MAX_ROUNDS" "$FINAL_LOG" "Review did not return a final signal"
   echo "Ralph review blocked. Report: $REVIEW_REPORT_PATH"
   exit 1
+fi
+
+if [ "$MODE" = "deploy" ]; then
+  mkdir -p "$(dirname "$DEPLOY_REPORT_PATH")" "$TMP_DIR" "$RUNS_DIR"
+  CURRENT_BRANCH="$(current_branch)"
+  BRANCH="$(assert_named_branch "$CURRENT_BRANCH")" || {
+    write_deploy_report "BLOCKED" "$CURRENT_BRANCH" "$DEPLOY_BASE_REF" "" "not checked" "Protected branch or detached HEAD"
+    exit 1
+  }
+
+  GH_CHECK_OUTPUT="$(require_gh 2>&1)" || {
+    echo "$GH_CHECK_OUTPUT" >&2
+    write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" "$GH_CHECK_OUTPUT"
+    exit 1
+  }
+
+  DIRTY_OUTPUT="$(assert_no_dirty_before_deploy 2>&1)" || {
+    echo "$DIRTY_OUTPUT" >&2
+    write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" "$DIRTY_OUTPUT"
+    exit 1
+  }
+
+  if [ "$DEPLOY_SKIP_REVIEW" != "1" ]; then
+    set +e
+    "$0" review "$REVIEW_MAX_ROUNDS" --base "$DEPLOY_BASE_REF"
+    REVIEW_STATUS=$?
+    set -e
+    if [ "$REVIEW_STATUS" -ne 0 ]; then
+      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" "Review failed before deploy"
+      echo "Ralph deploy blocked by review. Report: $DEPLOY_REPORT_PATH"
+      exit 1
+    fi
+    DIRTY_OUTPUT="$(assert_no_dirty_before_deploy 2>&1)" || {
+      echo "$DIRTY_OUTPUT" >&2
+      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" "$DIRTY_OUTPUT"
+      exit 1
+    }
+  fi
+
+  PUSH_OUTPUT="$(push_current_branch "$BRANCH" 2>&1)" || {
+    echo "$PUSH_OUTPUT" >&2
+    write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" "Push failed
+$PUSH_OUTPUT"
+    exit 1
+  }
+
+  PR_OUTPUT="$(create_pr_to_main "$BRANCH" 2>&1)" || {
+    echo "$PR_OUTPUT" >&2
+    write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" "PR creation failed
+$PR_OUTPUT"
+    exit 1
+  }
+  PR_URL="$(printf '%s\n' "$PR_OUTPUT" | grep -Eo 'https?://[^[:space:]]+' | tail -n 1 || true)"
+  if [ -z "$PR_URL" ]; then
+    PR_URL="$PR_OUTPUT"
+  fi
+
+  write_deploy_report "CI_GREEN" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "green placeholder" ""
+  echo "Ralph deploy CI green. PR: $PR_URL"
+  echo "Report: $DEPLOY_REPORT_PATH"
+  exit 0
 fi
 
 echo "Ralph mode: $MODE"
