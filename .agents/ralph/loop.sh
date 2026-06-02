@@ -1532,7 +1532,11 @@ latest_ci_run_id() {
   local branch="$1"
   local head_sha="${2:-}"
   local runs
-  runs="$(cd "$ROOT_DIR" && gh run list --branch "$branch" --limit 10 --json databaseId,status,conclusion,headSha 2>/dev/null || true)"
+  if [ -n "$head_sha" ]; then
+    runs="$(cd "$ROOT_DIR" && gh run list --branch "$branch" --commit "$head_sha" --limit 100 --json databaseId,status,conclusion,headSha 2>/dev/null || true)"
+  else
+    runs="$(cd "$ROOT_DIR" && gh run list --branch "$branch" --limit 100 --json databaseId,status,conclusion,headSha 2>/dev/null || true)"
+  fi
   python3 - "$runs" "$head_sha" <<'PY'
 import json
 import sys
@@ -1576,7 +1580,11 @@ latest_ci_conclusion() {
   local branch="$1"
   local head_sha="${2:-}"
   local runs
-  runs="$(cd "$ROOT_DIR" && gh run list --branch "$branch" --limit 10 --json databaseId,status,conclusion,headSha 2>/dev/null || true)"
+  if [ -n "$head_sha" ]; then
+    runs="$(cd "$ROOT_DIR" && gh run list --branch "$branch" --commit "$head_sha" --limit 100 --json databaseId,status,conclusion,headSha 2>/dev/null || true)"
+  else
+    runs="$(cd "$ROOT_DIR" && gh run list --branch "$branch" --limit 100 --json databaseId,status,conclusion,headSha 2>/dev/null || true)"
+  fi
   python3 - "$runs" "$head_sha" <<'PY'
 import json
 import sys

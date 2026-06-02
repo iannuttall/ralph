@@ -352,6 +352,8 @@ function assertReportSectionIncludes(root, reportPath, section, expected) {
     requireStatus("deploy blocks mixed current-head ci", result, 1);
     const ghLog = readFileSync(logPath, "utf-8");
     requireIncludes("deploy blocks mixed current-head ci", ghLog, "run view");
+    requireIncludes("deploy blocks mixed current-head ci", ghLog, "--commit");
+    requireIncludes("deploy blocks mixed current-head ci", ghLog, "--limit 100");
     assertReport(root, path.join(root, ".ralph", "deploy-report.md"), [
       "Final verdict: BLOCKED",
       "Final CI status: red",
