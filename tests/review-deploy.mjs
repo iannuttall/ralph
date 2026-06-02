@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -104,6 +104,7 @@ function writeFakeGh(root) {
     [
       "#!/usr/bin/env bash",
       "set -euo pipefail",
+      `printf 'cwd=%s\\n' "$PWD" >> ${JSON.stringify(logPath)}`,
       `printf '%s\\n' "$*" >> ${JSON.stringify(logPath)}`,
       'if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then',
       "  echo 'Logged in to github.com'",
@@ -124,6 +125,19 @@ function writeFakeGh(root) {
     { mode: 0o755 },
   );
   return { fakeBin, logPath, fakePrUrl };
+}
+
+function pathWithoutGh(root) {
+  const fakeBin = path.join(root, ".ralph", "no-gh-bin");
+  mkdirSync(fakeBin, { recursive: true });
+  for (const name of ["cat", "chmod", "date", "dirname", "git", "mkdir", "pwd", "sed"]) {
+    const found = spawnSync("sh", ["-lc", `command -v ${name}`], { encoding: "utf-8" });
+    if (found.status !== 0) continue;
+    const target = found.stdout.trim();
+    if (!target) continue;
+    symlinkSync(target, path.join(fakeBin, name));
+  }
+  return fakeBin;
 }
 
 function makeBranchPushable(root) {
@@ -208,7 +222,7 @@ function assertReportSectionIncludes(root, reportPath, section, expected) {
 {
   const root = setupReviewProject();
   try {
-    const result = runRalph(root, ["deploy", "1", "--skip-review"], { PATH: "/usr/bin:/bin" });
+    const result = runRalph(root, ["deploy", "1", "--skip-review"], { PATH: pathWithoutGh(root) });
     requireStatus("deploy requires gh", result, 1);
     requireIncludes("deploy requires gh", `${result.stdout}\n${result.stderr}`, "GitHub CLI not found");
     assertReport(root, path.join(root, ".ralph", "deploy-report.md"), [
@@ -225,12 +239,55 @@ function assertReportSectionIncludes(root, reportPath, section, expected) {
   const remote = makeBranchPushable(root);
   const { fakeReview } = writeFakeReview(root, ["echo '<review>MERGEABLE</review>'"]);
   const { fakeBin, logPath, fakePrUrl } = writeFakeGh(root);
+  const outsideCwd = mkdtempSync(path.join(tmpdir(), "ralph-outside-"));
   try {
-    const result = runRalph(root, ["deploy", "1"], {
-      PATH: `${fakeBin}:${process.env.PATH}`,
-      REVIEW_CMD: fakeReview,
+    const result = run(loopPath, ["deploy", "1"], {
+      cwd: outsideCwd,
+      env: {
+        ...process.env,
+        RALPH_ROOT: root,
+        RALPH_SKIP_UPDATE_CHECK: "1",
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        REVIEW_CMD: fakeReview,
+        PROMPT_REVIEW: path.join(repoRoot, ".agents", "ralph", "PROMPT_review.txt"),
+        PROMPT_DEPLOY_FIX: path.join(repoRoot, ".agents", "ralph", "PROMPT_deploy_fix.txt"),
+      },
     });
     requireStatus("deploy creates PR", result, 0);
+    const ghLog = readFileSync(logPath, "utf-8");
+    requireIncludes("gh log", ghLog, `cwd=${root}`);
+    requireIncludes("gh log", ghLog, "auth status");
+    requireIncludes("gh log", ghLog, "pr create");
+    requireIncludes("gh log", ghLog, "--title");
+    requireIncludes("gh log", ghLog, "--body");
+    requireIncludes("gh log", ghLog, "## Summary");
+    assertReport(root, path.join(root, ".ralph", "deploy-report.md"), [
+      "Final verdict: CI_GREEN",
+      "Final CI status: green",
+      "Review report:",
+      "Deploy rounds run: 1",
+      "Final logs path:",
+      "CI runs watched: 0",
+      "Failed jobs: 0",
+      "Fixes pushed: 0",
+      fakePrUrl,
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+    rmSync(outsideCwd, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = setupReviewProject();
+  const remote = makeBranchPushable(root);
+  const { fakeBin, logPath, fakePrUrl } = writeFakeGh(root);
+  try {
+    const result = runRalph(root, ["deploy", "1", "--skip-review"], {
+      PATH: `${fakeBin}:${process.env.PATH}`,
+    });
+    requireStatus("deploy creates PR with skip review", result, 0);
     const ghLog = readFileSync(logPath, "utf-8");
     requireIncludes("gh log", ghLog, "auth status");
     requireIncludes("gh log", ghLog, "pr create");

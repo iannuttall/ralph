@@ -1395,7 +1395,12 @@ write_deploy_report() {
   local base_ref="$3"
   local pr_url="$4"
   local ci_status="$5"
-  local blocker="$6"
+  local rounds_run="${6:-0}"
+  local final_log="${7:-}"
+  local ci_runs_watched="${8:-0}"
+  local failed_jobs="${9:-0}"
+  local fixes_pushed="${10:-0}"
+  local blocker="${11:-}"
   {
     echo "# Ralph Deploy Report"
     echo ""
@@ -1404,9 +1409,14 @@ write_deploy_report() {
     echo "- Base ref: $base_ref"
     echo "- Head SHA: $(git_head)"
     echo "- PR URL: ${pr_url:-"(none)"}"
+    echo "- Review report: $REVIEW_REPORT_PATH"
+    echo "- Deploy rounds run: $rounds_run"
     echo "- Final verdict: $verdict"
-    echo "- CI status: $ci_status"
-    echo "- CI status placeholder: green"
+    echo "- Final CI status: $ci_status"
+    echo "- Final logs path: ${final_log:-"(none)"}"
+    echo "- CI runs watched: $ci_runs_watched"
+    echo "- Failed jobs: $failed_jobs"
+    echo "- Fixes pushed: $fixes_pushed"
     echo "- Review skipped: $DEPLOY_SKIP_REVIEW"
     echo "- Review max rounds: $REVIEW_MAX_ROUNDS"
     echo ""
@@ -1426,7 +1436,31 @@ push_current_branch() {
 
 create_pr_to_main() {
   local branch="$1"
-  gh pr create --base "$DEPLOY_BASE_REF" --head "$branch" --fill
+  local title
+  title="$(printf '%s' "$branch" | sed 's#^[^/]*/##; s/-/ /g; s/_/ /g')"
+  if [ -z "$title" ]; then
+    title="Ralph deploy"
+  fi
+  local body
+  body="$(cat <<'EOF'
+## Summary
+
+## Changes
+- Added:
+- Updated:
+- Removed:
+
+## Reason
+
+## Testing
+- [ ] Ralph review passed
+- [ ] CI watched by Ralph deploy
+EOF
+)"
+  (
+    cd "$ROOT_DIR"
+    gh pr create --base "$DEPLOY_BASE_REF" --head "$branch" --title "$title" --body "$body"
+  )
 }
 
 if [ "$MODE" = "review" ]; then
@@ -1493,19 +1527,19 @@ if [ "$MODE" = "deploy" ]; then
   mkdir -p "$(dirname "$DEPLOY_REPORT_PATH")" "$TMP_DIR" "$RUNS_DIR"
   CURRENT_BRANCH="$(current_branch)"
   BRANCH="$(assert_named_branch "$CURRENT_BRANCH")" || {
-    write_deploy_report "BLOCKED" "$CURRENT_BRANCH" "$DEPLOY_BASE_REF" "" "not checked" "Protected branch or detached HEAD"
+    write_deploy_report "BLOCKED" "$CURRENT_BRANCH" "$DEPLOY_BASE_REF" "" "not checked" 0 "" 0 0 0 "Protected branch or detached HEAD"
     exit 1
   }
 
   GH_CHECK_OUTPUT="$(require_gh 2>&1)" || {
     echo "$GH_CHECK_OUTPUT" >&2
-    write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" "$GH_CHECK_OUTPUT"
+    write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" 0 "" 0 0 0 "$GH_CHECK_OUTPUT"
     exit 1
   }
 
   DIRTY_OUTPUT="$(assert_no_dirty_before_deploy 2>&1)" || {
     echo "$DIRTY_OUTPUT" >&2
-    write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" "$DIRTY_OUTPUT"
+    write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" 0 "" 0 0 0 "$DIRTY_OUTPUT"
     exit 1
   }
 
@@ -1515,27 +1549,27 @@ if [ "$MODE" = "deploy" ]; then
     REVIEW_STATUS=$?
     set -e
     if [ "$REVIEW_STATUS" -ne 0 ]; then
-      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" "Review failed before deploy"
+      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" 0 "" 0 0 0 "Review failed before deploy"
       echo "Ralph deploy blocked by review. Report: $DEPLOY_REPORT_PATH"
       exit 1
     fi
     DIRTY_OUTPUT="$(assert_no_dirty_before_deploy 2>&1)" || {
       echo "$DIRTY_OUTPUT" >&2
-      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" "$DIRTY_OUTPUT"
+      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" 0 "" 0 0 0 "$DIRTY_OUTPUT"
       exit 1
     }
   fi
 
   PUSH_OUTPUT="$(push_current_branch "$BRANCH" 2>&1)" || {
     echo "$PUSH_OUTPUT" >&2
-    write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" "Push failed
+    write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" 0 "" 0 0 0 "Push failed
 $PUSH_OUTPUT"
     exit 1
   }
 
   PR_OUTPUT="$(create_pr_to_main "$BRANCH" 2>&1)" || {
     echo "$PR_OUTPUT" >&2
-    write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" "PR creation failed
+    write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "" "not checked" 0 "" 0 0 0 "PR creation failed
 $PR_OUTPUT"
     exit 1
   }
@@ -1544,7 +1578,7 @@ $PR_OUTPUT"
     PR_URL="$PR_OUTPUT"
   fi
 
-  write_deploy_report "CI_GREEN" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "green placeholder" ""
+  write_deploy_report "CI_GREEN" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "green" 1 "" 0 0 0 ""
   echo "Ralph deploy CI green. PR: $PR_URL"
   echo "Report: $DEPLOY_REPORT_PATH"
   exit 0
