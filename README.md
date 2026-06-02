@@ -95,6 +95,27 @@ PRD story status fields are updated automatically by the loop:
 
 If a loop crashes and a story stays `in_progress`, you can set `STALE_SECONDS` in `.agents/ralph/config.sh` to allow Ralph to automatically reopen stalled stories.
 
+## Review and deploy
+
+Review the current feature branch before creating a PR:
+
+```bash
+ralph review
+ralph review 5 --base main
+```
+
+`ralph review` runs a local Codex GPT-5.5 xhigh priority review loop against `main` or `origin/main`, writes `.ralph/review-report.md`, and stops when the review verdict is mergeable. It refuses protected branches, detached HEAD, and branches with no reviewable diff.
+
+Create a PR and keep CI green:
+
+```bash
+ralph deploy
+ralph deploy 25 --base main
+ralph deploy 1 --skip-review
+```
+
+`ralph deploy` requires an authenticated `gh` CLI. It runs `ralph review` by default, pushes the current branch, creates a PR to `main`, watches the latest CI run for the current head, fixes red CI with Codex GPT-5.5 xhigh priority, commits fixes as `fix(ci): address CI failure`, pushes again, and writes `.ralph/deploy-report.md`.
+
 ## Override PRD paths
 
 You can point Ralph at a different PRD JSON file via CLI flags:
@@ -153,6 +174,8 @@ opencode -> curl -fsSL https://opencode.ai/install.sh | bash
 - `guardrails.md` — “Signs” (lessons learned)
 - `activity.log` — activity + timing log
 - `errors.log` — repeated failures and notes
+- `review-report.md` — final `ralph review` verdict and reviewed files
+- `deploy-report.md` — final `ralph deploy` verdict, PR URL, and CI status
 - `runs/` — raw run logs + summaries
 
 ## Notes

@@ -9,6 +9,23 @@ ralph build 1 --no-commit # one Ralph run
 ralph overview
 ```
 
+Review current branch:
+
+```bash
+ralph review
+ralph review 5 --base main
+cat .ralph/review-report.md
+```
+
+Deploy current branch:
+
+```bash
+ralph deploy
+ralph deploy 25 --base main
+ralph deploy 1 --skip-review
+cat .ralph/deploy-report.md
+```
+
 Agent override:
 
 ```bash
