@@ -93,12 +93,34 @@ function writeFakeReview(root, lines = ["echo '<review>MERGEABLE</review>'"]) {
   return { fakeReview, promptPath };
 }
 
-function writeFakeGh(root) {
+function writeFakeDeployFix(root) {
+  const fakeRoot = path.join(root, ".ralph", "test");
+  mkdirSync(fakeRoot, { recursive: true });
+  const promptPath = path.join(fakeRoot, "deploy-fix-prompt.md");
+  const fakeFix = path.join(fakeRoot, "fake-deploy-fix-agent.sh");
+  writeFileSync(
+    fakeFix,
+    [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      `cat > ${JSON.stringify(promptPath)}`,
+      `echo 'ci fixed' >> ${JSON.stringify(path.join(root, "app.txt"))}`,
+      "echo '<deploy-fix>COMPLETE</deploy-fix>'",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return { fakeFix, promptPath };
+}
+
+function writeFakeGh(root, { ciState = "green" } = {}) {
   const fakeBin = path.join(root, ".ralph", "fakebin");
   const logPath = path.join(root, ".ralph", "gh.log");
+  const statePath = path.join(root, ".ralph", "gh-state");
   const fakePrUrl = "https://github.example.com/owner/repo/pull/123";
   const fakeGh = path.join(fakeBin, "gh");
   mkdirSync(fakeBin, { recursive: true });
+  writeFileSync(statePath, ciState);
   writeFileSync(
     fakeGh,
     [
@@ -106,6 +128,8 @@ function writeFakeGh(root) {
       "set -euo pipefail",
       `printf 'cwd=%s\\n' "$PWD" >> ${JSON.stringify(logPath)}`,
       `printf '%s\\n' "$*" >> ${JSON.stringify(logPath)}`,
+      `state_path=${JSON.stringify(statePath)}`,
+      'state="$(cat "$state_path")"',
       'if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then',
       "  echo 'Logged in to github.com'",
       "  exit 0",
@@ -114,8 +138,20 @@ function writeFakeGh(root) {
       `  echo ${JSON.stringify(fakePrUrl)}`,
       "  exit 0",
       "fi",
-      'if [ "${1:-}" = "run" ]; then',
-      "  echo '[]'",
+      'if [ "${1:-}" = "run" ] && [ "${2:-}" = "list" ]; then',
+      '  if [ "$state" = "green" ]; then',
+      '    echo \'[{"databaseId":123,"status":"completed","conclusion":"success"}]\'',
+      "  else",
+      '    echo \'[{"databaseId":123,"status":"completed","conclusion":"failure"}]\'',
+      "  fi",
+      "  exit 0",
+      "fi",
+      'if [ "${1:-}" = "run" ] && [ "${2:-}" = "watch" ]; then',
+      "  exit 0",
+      "fi",
+      'if [ "${1:-}" = "run" ] && [ "${2:-}" = "view" ]; then',
+      "  echo 'Error: expected green but found red'",
+      '  echo green > "$state_path"',
       "  exit 0",
       "fi",
       'echo "unsupported fake gh: $*" >&2',
@@ -124,7 +160,7 @@ function writeFakeGh(root) {
     ].join("\n"),
     { mode: 0o755 },
   );
-  return { fakeBin, logPath, fakePrUrl };
+  return { fakeBin, logPath, fakePrUrl, statePath };
 }
 
 function pathWithoutGh(root) {
@@ -267,7 +303,7 @@ function assertReportSectionIncludes(root, reportPath, section, expected) {
       "Review report:",
       "Deploy rounds run: 1",
       "Final logs path:",
-      "CI runs watched: 0",
+      "CI runs watched: 1",
       "Failed jobs: 0",
       "Fixes pushed: 0",
       fakePrUrl,
@@ -293,6 +329,39 @@ function assertReportSectionIncludes(root, reportPath, section, expected) {
     requireIncludes("gh log", ghLog, "pr create");
     assertReport(root, path.join(root, ".ralph", "deploy-report.md"), [
       "Final verdict: CI_GREEN",
+      fakePrUrl,
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = setupReviewProject();
+  const remote = makeBranchPushable(root);
+  const { fakeReview } = writeFakeReview(root, ["echo '<review>MERGEABLE</review>'"]);
+  const { fakeFix, promptPath } = writeFakeDeployFix(root);
+  const { fakeBin, fakePrUrl } = writeFakeGh(root, { ciState: "red" });
+  try {
+    const result = runRalph(root, ["deploy", "2"], {
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      REVIEW_CMD: fakeReview,
+      DEPLOY_FIX_CMD: fakeFix,
+    });
+    requireStatus("deploy fixes ci", result, 0);
+    if (!existsSync(promptPath)) {
+      console.error("deploy fixes ci failed: fix prompt was not captured.");
+      process.exit(1);
+    }
+    const prompt = readFileSync(promptPath, "utf-8");
+    requireIncludes("deploy fix prompt", prompt, "$use-gpt55-subagents");
+    requireIncludes("deploy fix prompt", prompt, "Failed CI Log");
+    const log = spawnSync("git", ["log", "--oneline", "-1"], { cwd: root, encoding: "utf-8" });
+    requireIncludes("deploy fixes ci commit", log.stdout, "fix(ci): address CI failure");
+    assertReport(root, path.join(root, ".ralph", "deploy-report.md"), [
+      "Final verdict: CI_GREEN",
+      "Final CI status: green",
       fakePrUrl,
     ]);
   } finally {

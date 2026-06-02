@@ -200,6 +200,28 @@ run_review_agent() {
   fi
 }
 
+run_deploy_fix_agent() {
+  local prompt_file="$1"
+  if [[ "$DEPLOY_FIX_CMD" == *"{prompt}"* ]]; then
+    local escaped
+    escaped=$(printf '%q' "$prompt_file")
+    local cmd="${DEPLOY_FIX_CMD//\{prompt\}/$escaped}"
+    (
+      cd "$ROOT_DIR"
+      export PATH="$GIT_GUARD_DIR:$PATH"
+      export RALPH_REAL_GIT="$REAL_GIT_BIN"
+      eval "$cmd"
+    )
+  else
+    (
+      cd "$ROOT_DIR"
+      export PATH="$GIT_GUARD_DIR:$PATH"
+      export RALPH_REAL_GIT="$REAL_GIT_BIN"
+      cat "$prompt_file" | eval "$DEPLOY_FIX_CMD"
+    )
+  fi
+}
+
 run_agent_inline() {
   local prompt_file="$1"
   local prompt_content
@@ -694,6 +716,19 @@ from pathlib import Path
 
 text = Path(sys.argv[1]).read_text(errors="replace")
 matches = re.findall(r"<review>(MERGEABLE|BLOCKED)</review>", text)
+print(matches[-1] if matches else "")
+PY
+}
+
+latest_deploy_fix_signal() {
+  local fix_log="$1"
+  python3 - "$fix_log" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(errors="replace")
+matches = re.findall(r"<deploy-fix>(COMPLETE|BLOCKED)</deploy-fix>", text)
 print(matches[-1] if matches else "")
 PY
 }
@@ -1368,7 +1403,7 @@ require_gh() {
     echo "GitHub CLI not found"
     return 1
   fi
-  if ! gh auth status >/dev/null 2>&1; then
+  if ! (cd "$ROOT_DIR" && gh auth status >/dev/null 2>&1); then
     echo "GitHub CLI authentication failed"
     return 1
   fi
@@ -1461,6 +1496,96 @@ EOF
     cd "$ROOT_DIR"
     gh pr create --base "$DEPLOY_BASE_REF" --head "$branch" --title "$title" --body "$body"
   )
+}
+
+latest_ci_run_id() {
+  local branch="$1"
+  local runs
+  runs="$(cd "$ROOT_DIR" && gh run list --branch "$branch" --limit 10 --json databaseId,status,conclusion 2>/dev/null || true)"
+  python3 - "$runs" <<'PY'
+import json
+import sys
+
+try:
+    runs = json.loads(sys.argv[1])
+except Exception:
+    runs = []
+if runs:
+    print(runs[0].get("databaseId", ""))
+PY
+}
+
+latest_ci_conclusion() {
+  local branch="$1"
+  local runs
+  runs="$(cd "$ROOT_DIR" && gh run list --branch "$branch" --limit 10 --json databaseId,status,conclusion 2>/dev/null || true)"
+  python3 - "$runs" <<'PY'
+import json
+import sys
+
+try:
+    runs = json.loads(sys.argv[1])
+except Exception:
+    runs = []
+if not runs:
+    print("unknown")
+    raise SystemExit
+
+run = runs[0]
+value = str(run.get("conclusion") or run.get("status") or "unknown").lower()
+if value in {"success", "green"}:
+    print("green")
+elif value in {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "red"}:
+    print("red")
+elif value in {"queued", "waiting", "requested", "in_progress", "pending"}:
+    print("pending")
+else:
+    print(value or "unknown")
+PY
+}
+
+collect_failed_ci_log() {
+  local run_id="$1"
+  local out="$2"
+  (cd "$ROOT_DIR" && gh run view "$run_id" --log-failed) > "$out" 2>&1 || true
+}
+
+render_deploy_fix_prompt() {
+  local dst="$1"
+  local deploy_log="$2"
+  local failed_ci_log="$3"
+  local pr_url="$4"
+  local branch="$5"
+  local round="$6"
+  render_template_file "$PROMPT_DEPLOY_FIX" "$dst" \
+    "REPO_ROOT=$ROOT_DIR" \
+    "DEPLOY_LOG_PATH=$deploy_log" \
+    "DEPLOY_REPORT_PATH=$DEPLOY_REPORT_PATH" \
+    "FAILED_CI_LOG_PATH=$failed_ci_log" \
+    "PR_URL=$pr_url" \
+    "BRANCH=$branch" \
+    "ROUND=$round" \
+    "DEPLOY_MAX_ROUNDS=$DEPLOY_MAX_ROUNDS"
+}
+
+commit_and_push_deploy_fixes() {
+  local branch="$1"
+  local dirty
+  dirty="$(non_ralph_dirty_files)"
+  if [ -z "$dirty" ]; then
+    echo "Deploy fix did not change non-Ralph files."
+    return 1
+  fi
+  while IFS= read -r file; do
+    file="${file#- }"
+    [ -n "$file" ] && git -C "$ROOT_DIR" add -- "$file"
+  done < <(printf '%s\n' "$dirty")
+  if git -C "$ROOT_DIR" diff --cached --quiet; then
+    echo "Deploy fix did not stage non-Ralph changes."
+    return 1
+  fi
+  git -C "$ROOT_DIR" commit -m "fix(ci): address CI failure"
+  git -C "$ROOT_DIR" push origin "$branch"
 }
 
 if [ "$MODE" = "review" ]; then
@@ -1578,10 +1703,94 @@ $PR_OUTPUT"
     PR_URL="$PR_OUTPUT"
   fi
 
-  write_deploy_report "CI_GREEN" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "green" 1 "" 0 0 0 ""
-  echo "Ralph deploy CI green. PR: $PR_URL"
-  echo "Report: $DEPLOY_REPORT_PATH"
-  exit 0
+  FINAL_LOG=""
+  CI_RUNS_WATCHED=0
+  FAILED_JOBS=0
+  FIXES_PUSHED=0
+  for round in $(seq 1 "$DEPLOY_MAX_ROUNDS"); do
+    RUN_ID="$(latest_ci_run_id "$BRANCH")"
+    if [ -n "$RUN_ID" ]; then
+      (cd "$ROOT_DIR" && gh run watch "$RUN_ID") || true
+      CI_RUNS_WATCHED=$((CI_RUNS_WATCHED + 1))
+    fi
+
+    CI_STATUS="$(latest_ci_conclusion "$BRANCH")"
+    if [ "$CI_STATUS" = "green" ]; then
+      write_deploy_report "CI_GREEN" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "green" "$round" "$FINAL_LOG" "$CI_RUNS_WATCHED" "$FAILED_JOBS" "$FIXES_PUSHED" ""
+      echo "Ralph deploy CI green. PR: $PR_URL"
+      echo "Report: $DEPLOY_REPORT_PATH"
+      exit 0
+    fi
+
+    if [ "$CI_STATUS" != "red" ]; then
+      FINAL_LOG="$RUNS_DIR/deploy-$RUN_TAG-round-$round-ci-wait.log"
+      if [ -n "$RUN_ID" ]; then
+        echo "CI run $RUN_ID status: $CI_STATUS" > "$FINAL_LOG"
+      else
+        echo "No CI run found for branch $BRANCH" > "$FINAL_LOG"
+      fi
+      if [ "$round" -lt "$DEPLOY_MAX_ROUNDS" ]; then
+        sleep "${DEPLOY_CI_POLL_SECONDS:-5}"
+        continue
+      fi
+      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "$CI_STATUS" "$round" "$FINAL_LOG" "$CI_RUNS_WATCHED" "$FAILED_JOBS" "$FIXES_PUSHED" "CI did not become green"
+      echo "Ralph deploy blocked by CI. Report: $DEPLOY_REPORT_PATH"
+      exit 1
+    fi
+
+    FAILED_JOBS=$((FAILED_JOBS + 1))
+    FAILED_CI_LOG="$RUNS_DIR/deploy-$RUN_TAG-round-$round-ci-failed.log"
+    FINAL_LOG="$FAILED_CI_LOG"
+    if [ -n "$RUN_ID" ]; then
+      collect_failed_ci_log "$RUN_ID" "$FAILED_CI_LOG"
+    else
+      echo "No CI run found for branch $BRANCH" > "$FAILED_CI_LOG"
+    fi
+
+    FIX_PROMPT="$TMP_DIR/deploy-fix-prompt-$RUN_TAG-$round.md"
+    FIX_LOG="$RUNS_DIR/deploy-$RUN_TAG-round-$round-fix.log"
+    render_deploy_fix_prompt "$FIX_PROMPT" "$FIX_LOG" "$FAILED_CI_LOG" "$PR_URL" "$BRANCH" "$round"
+
+    set +e
+    if [ "${RALPH_DRY_RUN:-}" = "1" ]; then
+      echo "[RALPH_DRY_RUN] Skipping deploy fix agent." | tee "$FIX_LOG"
+      FIX_STATUS=0
+    else
+      require_agent "$DEPLOY_FIX_CMD"
+      run_deploy_fix_agent "$FIX_PROMPT" 2>&1 | tee "$FIX_LOG"
+      FIX_STATUS=${PIPESTATUS[0]}
+    fi
+    set -e
+    unstage_ralph_artifacts
+
+    if [ "$FIX_STATUS" -ne 0 ]; then
+      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "$CI_STATUS" "$round" "$FIX_LOG" "$CI_RUNS_WATCHED" "$FAILED_JOBS" "$FIXES_PUSHED" "Deploy fix command failed"
+      echo "Ralph deploy blocked by deploy-fix command. Report: $DEPLOY_REPORT_PATH"
+      exit 1
+    fi
+
+    FIX_SIGNAL="$(latest_deploy_fix_signal "$FIX_LOG")"
+    if [ "$FIX_SIGNAL" != "COMPLETE" ]; then
+      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "$CI_STATUS" "$round" "$FIX_LOG" "$CI_RUNS_WATCHED" "$FAILED_JOBS" "$FIXES_PUSHED" "Deploy fix did not complete"
+      echo "Ralph deploy blocked by deploy-fix signal. Report: $DEPLOY_REPORT_PATH"
+      exit 1
+    fi
+
+    COMMIT_OUTPUT="$(commit_and_push_deploy_fixes "$BRANCH" 2>&1)" || {
+      echo "$COMMIT_OUTPUT" >&2
+      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "$CI_STATUS" "$round" "$FIX_LOG" "$CI_RUNS_WATCHED" "$FAILED_JOBS" "$FIXES_PUSHED" "Commit or push of deploy fixes failed
+$COMMIT_OUTPUT"
+      exit 1
+    }
+    if [ -n "$COMMIT_OUTPUT" ]; then
+      echo "$COMMIT_OUTPUT"
+    fi
+    FIXES_PUSHED=$((FIXES_PUSHED + 1))
+  done
+
+  write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "red" "$DEPLOY_MAX_ROUNDS" "$FINAL_LOG" "$CI_RUNS_WATCHED" "$FAILED_JOBS" "$FIXES_PUSHED" "CI remained red after max rounds"
+  echo "Ralph deploy blocked by CI. Report: $DEPLOY_REPORT_PATH"
+  exit 1
 fi
 
 echo "Ralph mode: $MODE"
