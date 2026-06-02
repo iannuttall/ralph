@@ -1409,6 +1409,20 @@ require_gh() {
   fi
 }
 
+agent_cmd_available() {
+  local agent_cmd="${1:-}"
+  local agent_bin
+  agent_bin="${agent_cmd%% *}"
+  if [ -z "$agent_bin" ]; then
+    echo "Agent command is empty."
+    return 1
+  fi
+  if ! command -v "$agent_bin" >/dev/null 2>&1; then
+    echo "Agent command not found: $agent_bin"
+    return 1
+  fi
+}
+
 non_ralph_dirty_files() {
   git_dirty_files
 }
@@ -1433,7 +1447,7 @@ write_deploy_report() {
   local rounds_run="${6:-0}"
   local final_log="${7:-}"
   local ci_runs_watched="${8:-0}"
-  local failed_jobs="${9:-0}"
+  local failed_runs="${9:-0}"
   local fixes_pushed="${10:-0}"
   local blocker="${11:-}"
   {
@@ -1450,7 +1464,7 @@ write_deploy_report() {
     echo "- Final CI status: $ci_status"
     echo "- Final logs path: ${final_log:-"(none)"}"
     echo "- CI runs watched: $ci_runs_watched"
-    echo "- Failed jobs: $failed_jobs"
+    echo "- Failed runs: $failed_runs"
     echo "- Fixes pushed: $fixes_pushed"
     echo "- Review skipped: $DEPLOY_SKIP_REVIEW"
     echo "- Review max rounds: $REVIEW_MAX_ROUNDS"
@@ -1500,9 +1514,10 @@ EOF
 
 latest_ci_run_id() {
   local branch="$1"
+  local head_sha="${2:-}"
   local runs
-  runs="$(cd "$ROOT_DIR" && gh run list --branch "$branch" --limit 10 --json databaseId,status,conclusion 2>/dev/null || true)"
-  python3 - "$runs" <<'PY'
+  runs="$(cd "$ROOT_DIR" && gh run list --branch "$branch" --limit 10 --json databaseId,status,conclusion,headSha 2>/dev/null || true)"
+  python3 - "$runs" "$head_sha" <<'PY'
 import json
 import sys
 
@@ -1510,16 +1525,26 @@ try:
     runs = json.loads(sys.argv[1])
 except Exception:
     runs = []
-if runs:
-    print(runs[0].get("databaseId", ""))
+head_sha = sys.argv[2]
+selected = None
+if head_sha:
+    for run in runs:
+        if str(run.get("headSha") or "") == head_sha:
+            selected = run
+            break
+if selected is None and runs and not any(run.get("headSha") for run in runs):
+    selected = runs[0]
+if selected:
+    print(selected.get("databaseId", ""))
 PY
 }
 
 latest_ci_conclusion() {
   local branch="$1"
+  local head_sha="${2:-}"
   local runs
-  runs="$(cd "$ROOT_DIR" && gh run list --branch "$branch" --limit 10 --json databaseId,status,conclusion 2>/dev/null || true)"
-  python3 - "$runs" <<'PY'
+  runs="$(cd "$ROOT_DIR" && gh run list --branch "$branch" --limit 10 --json databaseId,status,conclusion,headSha 2>/dev/null || true)"
+  python3 - "$runs" "$head_sha" <<'PY'
 import json
 import sys
 
@@ -1527,11 +1552,20 @@ try:
     runs = json.loads(sys.argv[1])
 except Exception:
     runs = []
-if not runs:
+head_sha = sys.argv[2]
+selected = None
+if head_sha:
+    for run in runs:
+        if str(run.get("headSha") or "") == head_sha:
+            selected = run
+            break
+if selected is None and runs and not any(run.get("headSha") for run in runs):
+    selected = runs[0]
+if selected is None:
     print("unknown")
     raise SystemExit
 
-run = runs[0]
+run = selected
 value = str(run.get("conclusion") or run.get("status") or "unknown").lower()
 if value in {"success", "green"}:
     print("green")
@@ -1705,18 +1739,19 @@ $PR_OUTPUT"
 
   FINAL_LOG=""
   CI_RUNS_WATCHED=0
-  FAILED_JOBS=0
+  FAILED_RUNS=0
   FIXES_PUSHED=0
   for round in $(seq 1 "$DEPLOY_MAX_ROUNDS"); do
-    RUN_ID="$(latest_ci_run_id "$BRANCH")"
+    CURRENT_HEAD_SHA="$(git_head)"
+    RUN_ID="$(latest_ci_run_id "$BRANCH" "$CURRENT_HEAD_SHA")"
     if [ -n "$RUN_ID" ]; then
       (cd "$ROOT_DIR" && gh run watch "$RUN_ID") || true
       CI_RUNS_WATCHED=$((CI_RUNS_WATCHED + 1))
     fi
 
-    CI_STATUS="$(latest_ci_conclusion "$BRANCH")"
+    CI_STATUS="$(latest_ci_conclusion "$BRANCH" "$CURRENT_HEAD_SHA")"
     if [ "$CI_STATUS" = "green" ]; then
-      write_deploy_report "CI_GREEN" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "green" "$round" "$FINAL_LOG" "$CI_RUNS_WATCHED" "$FAILED_JOBS" "$FIXES_PUSHED" ""
+      write_deploy_report "CI_GREEN" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "green" "$round" "$FINAL_LOG" "$CI_RUNS_WATCHED" "$FAILED_RUNS" "$FIXES_PUSHED" ""
       echo "Ralph deploy CI green. PR: $PR_URL"
       echo "Report: $DEPLOY_REPORT_PATH"
       exit 0
@@ -1733,12 +1768,12 @@ $PR_OUTPUT"
         sleep "${DEPLOY_CI_POLL_SECONDS:-5}"
         continue
       fi
-      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "$CI_STATUS" "$round" "$FINAL_LOG" "$CI_RUNS_WATCHED" "$FAILED_JOBS" "$FIXES_PUSHED" "CI did not become green"
+      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "$CI_STATUS" "$round" "$FINAL_LOG" "$CI_RUNS_WATCHED" "$FAILED_RUNS" "$FIXES_PUSHED" "CI did not become green"
       echo "Ralph deploy blocked by CI. Report: $DEPLOY_REPORT_PATH"
       exit 1
     fi
 
-    FAILED_JOBS=$((FAILED_JOBS + 1))
+    FAILED_RUNS=$((FAILED_RUNS + 1))
     FAILED_CI_LOG="$RUNS_DIR/deploy-$RUN_TAG-round-$round-ci-failed.log"
     FINAL_LOG="$FAILED_CI_LOG"
     if [ -n "$RUN_ID" ]; then
@@ -1752,33 +1787,41 @@ $PR_OUTPUT"
     render_deploy_fix_prompt "$FIX_PROMPT" "$FIX_LOG" "$FAILED_CI_LOG" "$PR_URL" "$BRANCH" "$round"
 
     set +e
+    FIX_BLOCKER="Deploy fix command failed"
     if [ "${RALPH_DRY_RUN:-}" = "1" ]; then
       echo "[RALPH_DRY_RUN] Skipping deploy fix agent." | tee "$FIX_LOG"
       FIX_STATUS=0
     else
-      require_agent "$DEPLOY_FIX_CMD"
-      run_deploy_fix_agent "$FIX_PROMPT" 2>&1 | tee "$FIX_LOG"
-      FIX_STATUS=${PIPESTATUS[0]}
+      DEPLOY_FIX_AGENT_CHECK="$(agent_cmd_available "$DEPLOY_FIX_CMD" 2>&1)"
+      if [ "$?" -ne 0 ]; then
+        FIX_BLOCKER="Deploy fix command unavailable"
+        printf '%s\n' "$DEPLOY_FIX_AGENT_CHECK" | tee "$FIX_LOG"
+        FIX_STATUS=127
+      else
+        run_deploy_fix_agent "$FIX_PROMPT" 2>&1 | tee "$FIX_LOG"
+        FIX_STATUS=${PIPESTATUS[0]}
+      fi
     fi
     set -e
     unstage_ralph_artifacts
 
     if [ "$FIX_STATUS" -ne 0 ]; then
-      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "$CI_STATUS" "$round" "$FIX_LOG" "$CI_RUNS_WATCHED" "$FAILED_JOBS" "$FIXES_PUSHED" "Deploy fix command failed"
+      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "$CI_STATUS" "$round" "$FIX_LOG" "$CI_RUNS_WATCHED" "$FAILED_RUNS" "$FIXES_PUSHED" "$FIX_BLOCKER
+$(cat "$FIX_LOG" 2>/dev/null || true)"
       echo "Ralph deploy blocked by deploy-fix command. Report: $DEPLOY_REPORT_PATH"
       exit 1
     fi
 
     FIX_SIGNAL="$(latest_deploy_fix_signal "$FIX_LOG")"
     if [ "$FIX_SIGNAL" != "COMPLETE" ]; then
-      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "$CI_STATUS" "$round" "$FIX_LOG" "$CI_RUNS_WATCHED" "$FAILED_JOBS" "$FIXES_PUSHED" "Deploy fix did not complete"
+      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "$CI_STATUS" "$round" "$FIX_LOG" "$CI_RUNS_WATCHED" "$FAILED_RUNS" "$FIXES_PUSHED" "Deploy fix did not complete"
       echo "Ralph deploy blocked by deploy-fix signal. Report: $DEPLOY_REPORT_PATH"
       exit 1
     fi
 
     COMMIT_OUTPUT="$(commit_and_push_deploy_fixes "$BRANCH" 2>&1)" || {
       echo "$COMMIT_OUTPUT" >&2
-      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "$CI_STATUS" "$round" "$FIX_LOG" "$CI_RUNS_WATCHED" "$FAILED_JOBS" "$FIXES_PUSHED" "Commit or push of deploy fixes failed
+      write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "$CI_STATUS" "$round" "$FIX_LOG" "$CI_RUNS_WATCHED" "$FAILED_RUNS" "$FIXES_PUSHED" "Commit or push of deploy fixes failed
 $COMMIT_OUTPUT"
       exit 1
     }
@@ -1788,7 +1831,7 @@ $COMMIT_OUTPUT"
     FIXES_PUSHED=$((FIXES_PUSHED + 1))
   done
 
-  write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "red" "$DEPLOY_MAX_ROUNDS" "$FINAL_LOG" "$CI_RUNS_WATCHED" "$FAILED_JOBS" "$FIXES_PUSHED" "CI remained red after max rounds"
+  write_deploy_report "BLOCKED" "$BRANCH" "$DEPLOY_BASE_REF" "$PR_URL" "red" "$DEPLOY_MAX_ROUNDS" "$FINAL_LOG" "$CI_RUNS_WATCHED" "$FAILED_RUNS" "$FIXES_PUSHED" "CI remained red after max rounds"
   echo "Ralph deploy blocked by CI. Report: $DEPLOY_REPORT_PATH"
   exit 1
 fi

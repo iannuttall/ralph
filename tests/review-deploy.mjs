@@ -38,6 +38,15 @@ function requireNotIncludes(name, text, unexpected) {
   }
 }
 
+function requireCount(name, text, expected, count) {
+  const actual = text.split(expected).length - 1;
+  if (actual !== count) {
+    console.error(`${name} failed: expected ${JSON.stringify(expected)} ${count} time(s), got ${actual}.`);
+    console.error(text);
+    process.exit(1);
+  }
+}
+
 function initGit(cwd) {
   for (const args of [
     ["init", "-b", "main"],
@@ -117,6 +126,10 @@ function writeFakeGh(root, { ciState = "green" } = {}) {
   const fakeBin = path.join(root, ".ralph", "fakebin");
   const logPath = path.join(root, ".ralph", "gh.log");
   const statePath = path.join(root, ".ralph", "gh-state");
+  const initialHead = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf-8",
+  }).stdout.trim();
   const fakePrUrl = "https://github.example.com/owner/repo/pull/123";
   const fakeGh = path.join(fakeBin, "gh");
   mkdirSync(fakeBin, { recursive: true });
@@ -129,6 +142,7 @@ function writeFakeGh(root, { ciState = "green" } = {}) {
       `printf 'cwd=%s\\n' "$PWD" >> ${JSON.stringify(logPath)}`,
       `printf '%s\\n' "$*" >> ${JSON.stringify(logPath)}`,
       `state_path=${JSON.stringify(statePath)}`,
+      `initial_head=${JSON.stringify(initialHead)}`,
       'state="$(cat "$state_path")"',
       'if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then',
       "  echo 'Logged in to github.com'",
@@ -139,10 +153,13 @@ function writeFakeGh(root, { ciState = "green" } = {}) {
       "  exit 0",
       "fi",
       'if [ "${1:-}" = "run" ] && [ "${2:-}" = "list" ]; then',
+      '  current_head="$(git rev-parse HEAD)"',
       '  if [ "$state" = "green" ]; then',
-      '    echo \'[{"databaseId":123,"status":"completed","conclusion":"success"}]\'',
+      '    printf \'[{"databaseId":"run-%s","headSha":"%s","status":"completed","conclusion":"success"}]\\n\' "$current_head" "$current_head"',
+      '  elif [ "$current_head" = "$initial_head" ]; then',
+      '    printf \'[{"databaseId":"run-%s","headSha":"%s","status":"completed","conclusion":"failure"}]\\n\' "$initial_head" "$initial_head"',
       "  else",
-      '    echo \'[{"databaseId":123,"status":"completed","conclusion":"failure"}]\'',
+      '    printf \'[{"databaseId":"run-%s","headSha":"%s","status":"completed","conclusion":"failure"},{"databaseId":"run-%s","headSha":"%s","status":"completed","conclusion":"success"}]\\n\' "$initial_head" "$initial_head" "$current_head" "$current_head"',
       "  fi",
       "  exit 0",
       "fi",
@@ -151,7 +168,6 @@ function writeFakeGh(root, { ciState = "green" } = {}) {
       "fi",
       'if [ "${1:-}" = "run" ] && [ "${2:-}" = "view" ]; then',
       "  echo 'Error: expected green but found red'",
-      '  echo green > "$state_path"',
       "  exit 0",
       "fi",
       'echo "unsupported fake gh: $*" >&2',
@@ -304,7 +320,7 @@ function assertReportSectionIncludes(root, reportPath, section, expected) {
       "Deploy rounds run: 1",
       "Final logs path:",
       "CI runs watched: 1",
-      "Failed jobs: 0",
+      "Failed runs: 0",
       "Fixes pushed: 0",
       fakePrUrl,
     ]);
@@ -342,7 +358,7 @@ function assertReportSectionIncludes(root, reportPath, section, expected) {
   const remote = makeBranchPushable(root);
   const { fakeReview } = writeFakeReview(root, ["echo '<review>MERGEABLE</review>'"]);
   const { fakeFix, promptPath } = writeFakeDeployFix(root);
-  const { fakeBin, fakePrUrl } = writeFakeGh(root, { ciState: "red" });
+  const { fakeBin, logPath, fakePrUrl } = writeFakeGh(root, { ciState: "red" });
   try {
     const result = runRalph(root, ["deploy", "2"], {
       PATH: `${fakeBin}:${process.env.PATH}`,
@@ -359,10 +375,35 @@ function assertReportSectionIncludes(root, reportPath, section, expected) {
     requireIncludes("deploy fix prompt", prompt, "Failed CI Log");
     const log = spawnSync("git", ["log", "--oneline", "-1"], { cwd: root, encoding: "utf-8" });
     requireIncludes("deploy fixes ci commit", log.stdout, "fix(ci): address CI failure");
+    const ghLog = readFileSync(logPath, "utf-8");
+    requireCount("deploy fixes ci", ghLog, "run view", 1);
     assertReport(root, path.join(root, ".ralph", "deploy-report.md"), [
       "Final verdict: CI_GREEN",
       "Final CI status: green",
       fakePrUrl,
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = setupReviewProject();
+  const remote = makeBranchPushable(root);
+  const { fakeReview } = writeFakeReview(root, ["echo '<review>MERGEABLE</review>'"]);
+  const { fakeBin } = writeFakeGh(root, { ciState: "red" });
+  try {
+    const result = runRalph(root, ["deploy", "1"], {
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      REVIEW_CMD: fakeReview,
+      DEPLOY_FIX_CMD: "missing-deploy-fix-agent",
+    });
+    requireStatus("deploy missing fix agent", result, 1);
+    assertReport(root, path.join(root, ".ralph", "deploy-report.md"), [
+      "Final verdict: BLOCKED",
+      "Deploy fix command unavailable",
+      "missing-deploy-fix-agent",
     ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
