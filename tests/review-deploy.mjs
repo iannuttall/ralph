@@ -30,6 +30,14 @@ function requireIncludes(name, text, expected) {
   }
 }
 
+function requireNotIncludes(name, text, unexpected) {
+  if (text.includes(unexpected)) {
+    console.error(`${name} failed: unexpected ${JSON.stringify(unexpected)}.`);
+    console.error(text);
+    process.exit(1);
+  }
+}
+
 function initGit(cwd) {
   for (const args of [
     ["init", "-b", "main"],
@@ -233,18 +241,20 @@ function assertReportSectionIncludes(root, reportPath, section, expected) {
 {
   const root = setupReviewProject();
   const { fakeReview } = writeFakeReview(root, [
-    "printf 'review fix\\n' > review-fix.txt",
+    "mkdir -p 'dir with spaces' .ralph .agents/tasks",
+    "printf 'review fix\\n' > 'dir with spaces/fix file.txt'",
+    "printf 'ralph artifact\\n' > .ralph/review.tmp",
+    "printf 'task artifact\\n' > .agents/tasks/review-task.json",
     "echo '<review>MERGEABLE</review>'",
   ]);
   try {
     const result = runRalph(root, ["review", "1"], { REVIEW_CMD: fakeReview });
     requireStatus("review mergeable with uncommitted file", result, 0);
-    assertReportSectionIncludes(
-      root,
-      path.join(root, ".ralph", "review-report.md"),
-      "## Uncommitted Changes",
-      "- review-fix.txt",
-    );
+    const reportPath = path.join(root, ".ralph", "review-report.md");
+    assertReportSectionIncludes(root, reportPath, "## Uncommitted Changes", "- dir with spaces/fix file.txt");
+    const report = readFileSync(reportPath, "utf-8");
+    requireNotIncludes("review report", report, ".agents/tasks");
+    requireNotIncludes("review report", report, ".ralph/review.tmp");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

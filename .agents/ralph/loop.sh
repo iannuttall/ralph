@@ -1268,19 +1268,43 @@ git_changed_files() {
 }
 
 git_dirty_files() {
-  if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    git -C "$ROOT_DIR" status --porcelain | awk '
-      {
-        path = substr($0, 4)
-        if (path ~ /^\.ralph(\/|$)/ || path ~ /^\.agents\/tasks(\/|$)/) {
-          next
-        }
-        print "- " path
-      }
-    '
-  else
+  if ! git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo ""
+    return 0
   fi
+  python3 - "$ROOT_DIR" <<'PY'
+import subprocess
+import sys
+
+root = sys.argv[1]
+result = subprocess.run(
+    ["git", "-C", root, "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,
+    check=False,
+)
+if result.returncode != 0:
+    sys.exit(0)
+
+entries = result.stdout.split(b"\0")
+i = 0
+while i < len(entries):
+    entry = entries[i]
+    i += 1
+    if not entry:
+        continue
+    status = entry[:2].decode("ascii", errors="replace")
+    path = entry[3:].decode("utf-8", errors="replace")
+    if "R" in status or "C" in status:
+        i += 1
+    if not path:
+        continue
+    if path == ".ralph" or path.startswith(".ralph/"):
+        continue
+    if path == ".agents/tasks" or path.startswith(".agents/tasks/"):
+        continue
+    print(f"- {path}")
+PY
 }
 
 write_review_report() {
