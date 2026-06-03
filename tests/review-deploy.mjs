@@ -47,6 +47,15 @@ function requireCount(name, text, expected, count) {
   }
 }
 
+function requireAtLeastCount(name, text, expected, minCount) {
+  const actual = text.split(expected).length - 1;
+  if (actual < minCount) {
+    console.error(`${name} failed: expected ${JSON.stringify(expected)} at least ${minCount} time(s), got ${actual}.`);
+    console.error(text);
+    process.exit(1);
+  }
+}
+
 function initGit(cwd) {
   for (const args of [
     ["init", "-b", "main"],
@@ -124,10 +133,11 @@ function writeFakeDeployFix(root) {
   return { fakeFix, promptPath };
 }
 
-function writeFakeGh(root, { ciState = "green", mixedCurrentHead = false } = {}) {
+function writeFakeGh(root, { ciState = "green", mixedCurrentHead = false, staleAfterFix = false } = {}) {
   const fakeBin = path.join(root, ".ralph", "fakebin");
   const logPath = path.join(root, ".ralph", "gh.log");
   const statePath = path.join(root, ".ralph", "gh-state");
+  const stalePath = path.join(root, ".ralph", "gh-stale-pr-served");
   const initialHead = spawnSync("git", ["rev-parse", "HEAD"], {
     cwd: root,
     encoding: "utf-8",
@@ -144,11 +154,35 @@ function writeFakeGh(root, { ciState = "green", mixedCurrentHead = false } = {})
       `printf 'cwd=%s\\n' "$PWD" >> ${JSON.stringify(logPath)}`,
       `printf '%s\\n' "$*" >> ${JSON.stringify(logPath)}`,
       `state_path=${JSON.stringify(statePath)}`,
+      `stale_path=${JSON.stringify(stalePath)}`,
       `initial_head=${JSON.stringify(initialHead)}`,
+      `fake_pr_url=${JSON.stringify(fakePrUrl)}`,
       `mixed_current_head=${mixedCurrentHead ? "1" : "0"}`,
+      `stale_after_fix=${staleAfterFix ? "1" : "0"}`,
       'state="$(cat "$state_path")"',
       'if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then',
       "  echo 'Logged in to github.com'",
+      "  exit 0",
+      "fi",
+      'if [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then',
+      '  current_head="$(git rev-parse HEAD)"',
+      '  run_url="https://github.example.com/owner/repo/actions/runs/1001/job/2001"',
+      '  success_check="{\\"__typename\\":\\"CheckRun\\",\\"detailsUrl\\":\\"$run_url\\",\\"name\\":\\"ci\\",\\"status\\":\\"COMPLETED\\",\\"conclusion\\":\\"SUCCESS\\"}"',
+      '  failure_check="{\\"__typename\\":\\"CheckRun\\",\\"detailsUrl\\":\\"$run_url\\",\\"name\\":\\"ci\\",\\"status\\":\\"COMPLETED\\",\\"conclusion\\":\\"FAILURE\\"}"',
+      '  if [ "$state" = "blocked" ]; then',
+      '    printf \'{"url":"%s","number":123,"state":"OPEN","isDraft":false,"headRefName":"feature/review","headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[%s]}\\n\' "$fake_pr_url" "$current_head" "$success_check"',
+      '  elif [ "$state" = "conflict" ]; then',
+      '    printf \'{"url":"%s","number":123,"state":"OPEN","isDraft":false,"headRefName":"feature/review","headRefOid":"%s","baseRefName":"main","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY","reviewDecision":null,"statusCheckRollup":[%s]}\\n\' "$fake_pr_url" "$current_head" "$success_check"',
+      '  elif [ "$state" = "green" ]; then',
+      '    printf \'{"url":"%s","number":123,"state":"OPEN","isDraft":false,"headRefName":"feature/review","headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","reviewDecision":null,"statusCheckRollup":[%s]}\\n\' "$fake_pr_url" "$current_head" "$success_check"',
+      '  elif [ "$stale_after_fix" = "1" ] && [ "$current_head" != "$initial_head" ] && [ ! -f "$stale_path" ]; then',
+      '    touch "$stale_path"',
+      '    printf \'{"url":"%s","number":123,"state":"OPEN","isDraft":false,"headRefName":"feature/review","headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","reviewDecision":null,"statusCheckRollup":[%s]}\\n\' "$fake_pr_url" "$initial_head" "$success_check"',
+      '  elif [ "$current_head" = "$initial_head" ]; then',
+      '    printf \'{"url":"%s","number":123,"state":"OPEN","isDraft":false,"headRefName":"feature/review","headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"UNSTABLE","reviewDecision":null,"statusCheckRollup":[%s]}\\n\' "$fake_pr_url" "$current_head" "$failure_check"',
+      "  else",
+      '    printf \'{"url":"%s","number":123,"state":"OPEN","isDraft":false,"headRefName":"feature/review","headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","reviewDecision":null,"statusCheckRollup":[%s]}\\n\' "$fake_pr_url" "$current_head" "$success_check"',
+      "  fi",
       "  exit 0",
       "fi",
       'if [ "${1:-}" = "pr" ] && [ "${2:-}" = "create" ]; then',
@@ -169,6 +203,7 @@ function writeFakeGh(root, { ciState = "green", mixedCurrentHead = false } = {})
       "  exit 0",
       "fi",
       'if [ "${1:-}" = "run" ] && [ "${2:-}" = "watch" ]; then',
+      "  echo 'Checks: fake workflow progress output'",
       "  exit 0",
       "fi",
       'if [ "${1:-}" = "run" ] && [ "${2:-}" = "view" ]; then',
@@ -392,7 +427,7 @@ function assertReportSectionIncludes(root, reportPath, section, expected) {
   const remote = makeBranchPushable(root);
   const { fakeReview } = writeFakeReview(root, ["echo '<review>MERGEABLE</review>'"]);
   const { fakeFix, promptPath } = writeFakeDeployFix(root);
-  const { fakeBin, logPath, fakePrUrl } = writeFakeGh(root, { ciState: "red" });
+  const { fakeBin, logPath, fakePrUrl } = writeFakeGh(root, { ciState: "red", staleAfterFix: true });
   try {
     const result = runRalph(root, ["deploy", "2"], {
       PATH: `${fakeBin}:${process.env.PATH}`,
@@ -529,6 +564,72 @@ function assertReportSectionIncludes(root, reportPath, section, expected) {
     ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = setupReviewProject();
+  const remote = makeBranchPushable(root);
+  const { fakeReview } = writeFakeReview(root, ["echo '<review>MERGEABLE</review>'"]);
+  const { fakeFix, promptPath } = writeFakeDeployFix(root);
+  const { fakeBin, logPath, fakePrUrl } = writeFakeGh(root, { ciState: "red" });
+  try {
+    const result = runRalph(root, ["review", "3"], {
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      REVIEW_CMD: fakeReview,
+      DEPLOY_FIX_CMD: fakeFix,
+    });
+    requireStatus("review fixes PR gate", result, 0);
+    if (!existsSync(promptPath)) {
+      console.error("review fixes PR gate failed: fix prompt was not captured.");
+      process.exit(1);
+    }
+    const prompt = readFileSync(promptPath, "utf-8");
+    requireIncludes("review PR fix prompt", prompt, "Failed PR Gate Log");
+    const log = spawnSync("git", ["log", "--oneline", "-1"], { cwd: root, encoding: "utf-8" });
+    requireIncludes("review fixes PR gate commit", log.stdout, "fix(ci): address CI failure");
+    const ghLog = readFileSync(logPath, "utf-8");
+    requireIncludes("review fixes PR gate", ghLog, "pr view");
+    requireAtLeastCount("review rechecks PR gate", ghLog, "pr view", 3);
+    requireIncludes("review fixes PR gate", ghLog, "run view");
+    assertReport(root, path.join(root, ".ralph", "review-report.md"), [
+      "Final verdict: MERGEABLE",
+      "Final PR gate status: mergeable",
+      "Failed PR gate rounds: 1",
+      "Fixes pushed: 1",
+      fakePrUrl,
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = setupReviewProject();
+  const remote = makeBranchPushable(root);
+  const { fakeReview } = writeFakeReview(root, ["echo '<review>MERGEABLE</review>'"]);
+  const { fakeFix, promptPath } = writeFakeDeployFix(root);
+  const { fakeBin } = writeFakeGh(root, { ciState: "blocked" });
+  try {
+    const result = runRalph(root, ["review", "2"], {
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      REVIEW_CMD: fakeReview,
+      DEPLOY_FIX_CMD: fakeFix,
+    });
+    requireStatus("review blocks non-code PR gate", result, 1);
+    if (existsSync(promptPath)) {
+      console.error("review blocks non-code PR gate failed: fix agent should not run.");
+      process.exit(1);
+    }
+    assertReport(root, path.join(root, ".ralph", "review-report.md"), [
+      "Final verdict: BLOCKED",
+      "Final PR gate status: blocked",
+      "PR gate blocked by non-code mergeability requirement",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
   }
 }
 

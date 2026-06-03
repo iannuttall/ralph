@@ -1,20 +1,20 @@
-# Ralph Deploy CI Fix
+# Ralph PR Gate Fix
 
-You are a fresh Codex CI-fix session launched by Ralph after a pull request CI failure.
+You are a fresh Codex fix session launched by Ralph after a pull request is not mergeable.
 
-Use the $use-gpt55-subagents skill before CI investigation. Spawn GPT-5.5 subagents with xhigh reasoning and priority service tier for bounded log analysis or verification work when it can run independently.
+Use the $use-gpt55-subagents skill before PR gate investigation. Spawn GPT-5.5 subagents with xhigh reasoning and priority service tier for bounded log analysis or verification work when it can run independently.
 
 ## Paths
 - Repo Root: {{REPO_ROOT}}
-- Deploy Log: {{DEPLOY_LOG_PATH}}
-- Deploy Report: {{DEPLOY_REPORT_PATH}}
-- Failed CI Log: {{FAILED_CI_LOG_PATH}}
+- Fix Log: {{DEPLOY_LOG_PATH}}
+- Report: {{DEPLOY_REPORT_PATH}}
+- Failed PR Gate Log (Failed CI Log): {{FAILED_CI_LOG_PATH}}
 - PR URL: {{PR_URL}}
 - Branch: {{BRANCH}}
 - Round: {{ROUND}}
 - Max Rounds: {{DEPLOY_MAX_ROUNDS}}
 
-## Failed CI Log
+## Failed PR Gate Log (Failed CI Log)
 
 Read this log file:
 
@@ -24,8 +24,9 @@ cat {{FAILED_CI_LOG_PATH}}
 
 ## Rules
 - Do not ask the user questions.
-- Fix only the CI failure shown in the failed log.
+- Fix only the PR gate failure shown in the failed log: red CI, generated artifacts/type drift, or merge conflicts with the base branch.
 - Read the related code before editing.
+- For merge conflicts, fetch the base branch and resolve via normal git merge conflict resolution. Do not force-push or rewrite history.
 - Run focused verification for your fix.
 - Do not commit, push, merge, or create a PR.
 - Do not stage Ralph artifacts under `.ralph/` or `.agents/tasks/`.
@@ -36,7 +37,7 @@ Output this exact signal when your local fix and verification are complete:
 
 <deploy-fix>COMPLETE</deploy-fix>
 
-If you cannot fix the CI failure, output:
+If you cannot fix the PR gate failure, output:
 
 <deploy-fix>BLOCKED</deploy-fix>
 

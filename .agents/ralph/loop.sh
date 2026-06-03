@@ -102,6 +102,7 @@ DEPLOY_REPORT_PATH="${DEPLOY_REPORT_PATH:-$DEFAULT_DEPLOY_REPORT_PATH}"
 REVIEW_BASE_REF="${REVIEW_BASE_REF:-}"
 DEPLOY_BASE_REF="${DEPLOY_BASE_REF:-main}"
 DEPLOY_SKIP_REVIEW="${DEPLOY_SKIP_REVIEW:-0}"
+REVIEW_PR_GATE="${REVIEW_PR_GATE:-1}"
 
 abs_path() {
   local p="$1"
@@ -1357,6 +1358,11 @@ write_review_report() {
   local rounds_run="$6"
   local review_log="$7"
   local blocker="$8"
+  local pr_url="${9:-}"
+  local pr_gate_status="${10:-not checked}"
+  local ci_runs_watched="${11:-0}"
+  local failed_pr_gates="${12:-0}"
+  local fixes_pushed="${13:-0}"
   local changed_files
   local uncommitted_files
   changed_files="$(git -C "$ROOT_DIR" diff --name-only "$base_sha"..HEAD 2>/dev/null | sed 's/^/- /' || true)"
@@ -1390,6 +1396,13 @@ write_review_report() {
     echo ""
     echo "## Verification"
     echo "- See review log: $review_log"
+    echo ""
+    echo "## Pull Request Gate"
+    echo "- PR URL: ${pr_url:-"(none)"}"
+    echo "- Final PR gate status: $pr_gate_status"
+    echo "- CI runs watched: $ci_runs_watched"
+    echo "- Failed PR gate rounds: $failed_pr_gates"
+    echo "- Fixes pushed: $fixes_pushed"
     echo ""
     echo "## Blockers"
     if [ -n "$blocker" ]; then
@@ -1624,6 +1637,212 @@ collect_failed_ci_log() {
   (cd "$ROOT_DIR" && gh run view "$run_id" --log-failed) > "$out" 2>&1 || true
 }
 
+pr_view_json() {
+  local branch="$1"
+  if ! command -v gh >/dev/null 2>&1; then
+    return 0
+  fi
+  (
+    cd "$ROOT_DIR"
+    gh pr view "$branch" --json url,number,state,isDraft,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup 2>/dev/null || true
+  )
+}
+
+pr_gate_url() {
+  local pr_json="$1"
+  python3 - "$pr_json" <<'PY'
+import json
+import sys
+
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    data = {}
+print(data.get("url") or "")
+PY
+}
+
+pr_gate_status() {
+  local pr_json="$1"
+  local expected_head="${2:-}"
+  python3 - "$pr_json" "$expected_head" <<'PY'
+import json
+import sys
+
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    print("no_pr")
+    raise SystemExit
+
+if not isinstance(data, dict) or not data:
+    print("no_pr")
+    raise SystemExit
+
+expected_head = sys.argv[2]
+pr_head = str(data.get("headRefOid") or "")
+if expected_head and pr_head and pr_head != expected_head:
+    print("pending")
+    raise SystemExit
+
+state = str(data.get("state") or "").upper()
+if state and state != "OPEN":
+    print("blocked")
+    raise SystemExit
+if data.get("isDraft"):
+    print("blocked")
+    raise SystemExit
+
+review_decision = str(data.get("reviewDecision") or "").upper()
+if review_decision in {"REVIEW_REQUIRED", "CHANGES_REQUESTED"}:
+    print("blocked")
+    raise SystemExit
+
+mergeable = str(data.get("mergeable") or "").upper()
+merge_state = str(data.get("mergeStateStatus") or "").upper()
+
+checks = data.get("statusCheckRollup") or []
+if expected_head and not checks:
+    print("pending")
+    raise SystemExit
+
+check_failed = False
+check_blocked = False
+check_pending = False
+for check in checks:
+    if not isinstance(check, dict):
+        continue
+    typename = str(check.get("__typename") or "")
+    if typename == "CheckRun":
+        status = str(check.get("status") or "").upper()
+        conclusion = str(check.get("conclusion") or "").upper()
+        if status and status != "COMPLETED":
+            check_pending = True
+        elif conclusion in {"ACTION_REQUIRED"}:
+            check_blocked = True
+        elif conclusion in {"FAILURE", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE", "ERROR"}:
+            check_failed = True
+        elif not conclusion:
+            check_pending = True
+    else:
+        state_value = str(check.get("state") or "").upper()
+        if state_value in {"ERROR", "FAILURE", "FAILED"}:
+            check_failed = True
+        elif state_value in {"PENDING", "EXPECTED", "WAITING", "QUEUED", "REQUESTED", "IN_PROGRESS"}:
+            check_pending = True
+
+if check_blocked:
+    print("blocked")
+elif mergeable == "CONFLICTING" or merge_state in {"DIRTY", "BEHIND"}:
+    print("red")
+elif check_failed or merge_state == "UNSTABLE":
+    print("red")
+elif check_pending or mergeable == "UNKNOWN" or merge_state == "UNKNOWN":
+    print("pending")
+elif merge_state == "BLOCKED":
+    print("blocked")
+elif mergeable == "MERGEABLE" and merge_state in {"CLEAN", "HAS_HOOKS"}:
+    print("green")
+elif mergeable == "MERGEABLE" and not merge_state:
+    print("green")
+else:
+    print("blocked")
+PY
+}
+
+pr_gate_run_ids() {
+  local pr_json="$1"
+  python3 - "$pr_json" <<'PY'
+import json
+import re
+import sys
+
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    data = {}
+
+seen = set()
+for check in data.get("statusCheckRollup") or []:
+    if not isinstance(check, dict):
+        continue
+    match = re.search(r"/actions/runs/([0-9]+)", str(check.get("detailsUrl") or ""))
+    if match and match.group(1) not in seen:
+        seen.add(match.group(1))
+        print(match.group(1))
+PY
+}
+
+failed_pr_gate_run_ids() {
+  local pr_json="$1"
+  python3 - "$pr_json" <<'PY'
+import json
+import re
+import sys
+
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    data = {}
+
+failed = {"FAILURE", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE", "ERROR", "ACTION_REQUIRED"}
+seen = set()
+for check in data.get("statusCheckRollup") or []:
+    if not isinstance(check, dict):
+        continue
+    conclusion = str(check.get("conclusion") or check.get("state") or "").upper()
+    if conclusion not in failed:
+        continue
+    match = re.search(r"/actions/runs/([0-9]+)", str(check.get("detailsUrl") or ""))
+    if match and match.group(1) not in seen:
+        seen.add(match.group(1))
+        print(match.group(1))
+PY
+}
+
+watch_pr_gate_runs() {
+  local pr_json="$1"
+  local count=0
+  while IFS= read -r run_id; do
+    [ -n "$run_id" ] || continue
+    (cd "$ROOT_DIR" && gh run watch "$run_id" >&2) || true
+    count=$((count + 1))
+  done < <(pr_gate_run_ids "$pr_json")
+  echo "$count"
+}
+
+collect_pr_gate_log() {
+  local branch="$1"
+  local pr_json="$2"
+  local out="$3"
+  local gate_status
+  gate_status="$(pr_gate_status "$pr_json" "$(git_head)")"
+  {
+    echo "# PR Gate Failure"
+    echo ""
+    echo "- Branch: $branch"
+    echo "- Gate status: $gate_status"
+    echo ""
+    echo "## gh pr view"
+    if ! printf '%s\n' "$pr_json" | python3 -m json.tool; then
+      printf '%s\n' "$pr_json"
+    fi
+    echo ""
+    echo "## Failed Workflow Logs"
+    local found=0
+    while IFS= read -r run_id; do
+      [ -n "$run_id" ] || continue
+      found=1
+      echo ""
+      echo "### Run $run_id"
+      (cd "$ROOT_DIR" && gh run view "$run_id" --log-failed) || true
+    done < <(failed_pr_gate_run_ids "$pr_json")
+    if [ "$found" -eq 0 ]; then
+      echo "- (none)"
+    fi
+  } > "$out" 2>&1
+}
+
 render_deploy_fix_prompt() {
   local dst="$1"
   local deploy_log="$2"
@@ -1642,6 +1861,24 @@ render_deploy_fix_prompt() {
     "DEPLOY_MAX_ROUNDS=$DEPLOY_MAX_ROUNDS"
 }
 
+render_review_pr_fix_prompt() {
+  local dst="$1"
+  local fix_log="$2"
+  local failed_pr_gate_log="$3"
+  local pr_url="$4"
+  local branch="$5"
+  local round="$6"
+  render_template_file "$PROMPT_DEPLOY_FIX" "$dst" \
+    "REPO_ROOT=$ROOT_DIR" \
+    "DEPLOY_LOG_PATH=$fix_log" \
+    "DEPLOY_REPORT_PATH=$REVIEW_REPORT_PATH" \
+    "FAILED_CI_LOG_PATH=$failed_pr_gate_log" \
+    "PR_URL=$pr_url" \
+    "BRANCH=$branch" \
+    "ROUND=$round" \
+    "DEPLOY_MAX_ROUNDS=$REVIEW_MAX_ROUNDS"
+}
+
 commit_and_push_deploy_fixes() {
   local branch="$1"
   local dirty
@@ -1656,6 +1893,51 @@ commit_and_push_deploy_fixes() {
   done < <(printf '%s\n' "$dirty")
   if git -C "$ROOT_DIR" diff --cached --quiet; then
     echo "Deploy fix did not stage non-Ralph changes."
+    return 1
+  fi
+  git -C "$ROOT_DIR" commit -m "fix(ci): address CI failure"
+  git -C "$ROOT_DIR" push origin "$branch"
+}
+
+commit_and_push_review_fixes() {
+  local branch="$1"
+  local baseline_dirty="$2"
+  local current_dirty="$TMP_DIR/review-current-dirty-$RUN_TAG-$$.txt"
+  local changed_files
+  non_ralph_dirty_files > "$current_dirty"
+  changed_files="$(python3 - "$baseline_dirty" "$current_dirty" <<'PY'
+import sys
+from pathlib import Path
+
+def read_paths(path):
+    if not Path(path).exists():
+        return []
+    paths = []
+    for line in Path(path).read_text(errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("- "):
+            line = line[2:]
+        paths.append(line)
+    return paths
+
+baseline = set(read_paths(sys.argv[1]))
+for path in read_paths(sys.argv[2]):
+    if path not in baseline:
+        print(path)
+PY
+)"
+  if [ -z "$changed_files" ]; then
+    echo "PR gate fix did not change non-baseline non-Ralph files."
+    return 1
+  fi
+  while IFS= read -r file; do
+    [ -n "$file" ] && git -C "$ROOT_DIR" add -- "$file"
+  done < <(printf '%s\n' "$changed_files")
+  unstage_ralph_artifacts
+  if git -C "$ROOT_DIR" diff --cached --quiet; then
+    echo "PR gate fix did not stage non-Ralph changes."
     return 1
   fi
   git -C "$ROOT_DIR" commit -m "fix(ci): address CI failure"
@@ -1680,6 +1962,11 @@ if [ "$MODE" = "review" ]; then
   fi
 
   FINAL_LOG=""
+  PR_URL=""
+  PR_GATE_STATUS="not checked"
+  CI_RUNS_WATCHED=0
+  FAILED_PR_GATES=0
+  FIXES_PUSHED=0
   for round in $(seq 1 "$REVIEW_MAX_ROUNDS"); do
     REVIEW_PROMPT="$TMP_DIR/review-prompt-$RUN_TAG-$round.md"
     REVIEW_LOG="$RUNS_DIR/review-$RUN_TAG-round-$round.log"
@@ -1700,24 +1987,133 @@ if [ "$MODE" = "review" ]; then
     unstage_ralph_artifacts
     log_activity "REVIEW round $round end (status=$REVIEW_STATUS log=$REVIEW_LOG)"
     if [ "$REVIEW_STATUS" -ne 0 ]; then
-      write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$round" "$REVIEW_LOG" "Review command failed"
+      write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$round" "$REVIEW_LOG" "Review command failed" "$PR_URL" "$PR_GATE_STATUS" "$CI_RUNS_WATCHED" "$FAILED_PR_GATES" "$FIXES_PUSHED"
       echo "Review command failed. Report: $REVIEW_REPORT_PATH"
       exit 1
     fi
     REVIEW_SIGNAL="$(latest_review_signal "$REVIEW_LOG")"
     if [ "$REVIEW_SIGNAL" = "MERGEABLE" ]; then
-      write_review_report "MERGEABLE" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$round" "$REVIEW_LOG" ""
-      echo "Ralph review mergeable. Report: $REVIEW_REPORT_PATH"
-      exit 0
+      if [ "$REVIEW_PR_GATE" != "1" ]; then
+        write_review_report "MERGEABLE" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$round" "$REVIEW_LOG" "" "$PR_URL" "skipped" "$CI_RUNS_WATCHED" "$FAILED_PR_GATES" "$FIXES_PUSHED"
+        echo "Ralph review mergeable. Report: $REVIEW_REPORT_PATH"
+        exit 0
+      fi
+
+      PR_JSON="$(pr_view_json "$BRANCH")"
+      if [ -z "$PR_JSON" ]; then
+        PR_GATE_STATUS="not checked"
+        write_review_report "MERGEABLE" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$round" "$REVIEW_LOG" "" "$PR_URL" "$PR_GATE_STATUS" "$CI_RUNS_WATCHED" "$FAILED_PR_GATES" "$FIXES_PUSHED"
+        echo "Ralph review mergeable. Report: $REVIEW_REPORT_PATH"
+        exit 0
+      fi
+
+      PR_URL="$(pr_gate_url "$PR_JSON")"
+      WATCHED_NOW="$(watch_pr_gate_runs "$PR_JSON")"
+      CI_RUNS_WATCHED=$((CI_RUNS_WATCHED + WATCHED_NOW))
+      PR_JSON="$(pr_view_json "$BRANCH")"
+      PR_GATE_STATUS="$(pr_gate_status "$PR_JSON" "$(git_head)")"
+
+      if [ "$PR_GATE_STATUS" = "green" ]; then
+        write_review_report "MERGEABLE" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$round" "$REVIEW_LOG" "" "$PR_URL" "mergeable" "$CI_RUNS_WATCHED" "$FAILED_PR_GATES" "$FIXES_PUSHED"
+        echo "Ralph review mergeable. Report: $REVIEW_REPORT_PATH"
+        exit 0
+      fi
+
+      if [ "$PR_GATE_STATUS" = "no_pr" ]; then
+        write_review_report "MERGEABLE" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$round" "$REVIEW_LOG" "" "$PR_URL" "no PR found" "$CI_RUNS_WATCHED" "$FAILED_PR_GATES" "$FIXES_PUSHED"
+        echo "Ralph review mergeable. Report: $REVIEW_REPORT_PATH"
+        exit 0
+      fi
+
+      if [ "$PR_GATE_STATUS" = "blocked" ]; then
+        PR_GATE_LOG="$RUNS_DIR/review-$RUN_TAG-round-$round-pr-gate-blocked.log"
+        FINAL_LOG="$PR_GATE_LOG"
+        collect_pr_gate_log "$BRANCH" "$PR_JSON" "$PR_GATE_LOG"
+        write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$round" "$PR_GATE_LOG" "PR gate blocked by non-code mergeability requirement" "$PR_URL" "$PR_GATE_STATUS" "$CI_RUNS_WATCHED" "$FAILED_PR_GATES" "$FIXES_PUSHED"
+        echo "Ralph review blocked by PR gate. Report: $REVIEW_REPORT_PATH"
+        exit 1
+      fi
+
+      if [ "$PR_GATE_STATUS" = "pending" ]; then
+        FINAL_LOG="$RUNS_DIR/review-$RUN_TAG-round-$round-pr-gate-pending.log"
+        {
+          echo "PR gate is pending after watch."
+          printf '%s\n' "$PR_JSON"
+        } > "$FINAL_LOG"
+        if [ "$round" -lt "$REVIEW_MAX_ROUNDS" ]; then
+          sleep "${REVIEW_CI_POLL_SECONDS:-5}"
+          continue
+        fi
+        write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$round" "$FINAL_LOG" "PR gate did not become mergeable" "$PR_URL" "$PR_GATE_STATUS" "$CI_RUNS_WATCHED" "$FAILED_PR_GATES" "$FIXES_PUSHED"
+        echo "Ralph review blocked by PR gate. Report: $REVIEW_REPORT_PATH"
+        exit 1
+      fi
+
+      FAILED_PR_GATES=$((FAILED_PR_GATES + 1))
+      FAILED_PR_GATE_LOG="$RUNS_DIR/review-$RUN_TAG-round-$round-pr-gate-failed.log"
+      FINAL_LOG="$FAILED_PR_GATE_LOG"
+      collect_pr_gate_log "$BRANCH" "$PR_JSON" "$FAILED_PR_GATE_LOG"
+
+      FIX_PROMPT="$TMP_DIR/review-pr-fix-prompt-$RUN_TAG-$round.md"
+      FIX_LOG="$RUNS_DIR/review-$RUN_TAG-round-$round-pr-gate-fix.log"
+      BASELINE_DIRTY="$TMP_DIR/review-baseline-dirty-$RUN_TAG-$round.txt"
+      non_ralph_dirty_files > "$BASELINE_DIRTY"
+      render_review_pr_fix_prompt "$FIX_PROMPT" "$FIX_LOG" "$FAILED_PR_GATE_LOG" "$PR_URL" "$BRANCH" "$round"
+
+      set +e
+      FIX_BLOCKER="PR gate fix command failed"
+      if [ "${RALPH_DRY_RUN:-}" = "1" ]; then
+        echo "[RALPH_DRY_RUN] Skipping PR gate fix agent." | tee "$FIX_LOG"
+        FIX_STATUS=0
+      else
+        REVIEW_FIX_AGENT_CHECK="$(agent_cmd_available "$DEPLOY_FIX_CMD" 2>&1)"
+        if [ "$?" -ne 0 ]; then
+          FIX_BLOCKER="PR gate fix command unavailable"
+          printf '%s\n' "$REVIEW_FIX_AGENT_CHECK" | tee "$FIX_LOG"
+          FIX_STATUS=127
+        else
+          run_deploy_fix_agent "$FIX_PROMPT" 2>&1 | tee "$FIX_LOG"
+          FIX_STATUS=${PIPESTATUS[0]}
+        fi
+      fi
+      set -e
+      unstage_ralph_artifacts
+
+      if [ "$FIX_STATUS" -ne 0 ]; then
+        write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$round" "$FIX_LOG" "$FIX_BLOCKER
+$(cat "$FIX_LOG" 2>/dev/null || true)" "$PR_URL" "$PR_GATE_STATUS" "$CI_RUNS_WATCHED" "$FAILED_PR_GATES" "$FIXES_PUSHED"
+        echo "Ralph review blocked by PR gate fix command. Report: $REVIEW_REPORT_PATH"
+        exit 1
+      fi
+
+      FIX_SIGNAL="$(latest_deploy_fix_signal "$FIX_LOG")"
+      if [ "$FIX_SIGNAL" != "COMPLETE" ]; then
+        write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$round" "$FIX_LOG" "PR gate fix did not complete
+$(cat "$FIX_LOG" 2>/dev/null || true)" "$PR_URL" "$PR_GATE_STATUS" "$CI_RUNS_WATCHED" "$FAILED_PR_GATES" "$FIXES_PUSHED"
+        echo "Ralph review blocked by PR gate fix signal. Report: $REVIEW_REPORT_PATH"
+        exit 1
+      fi
+
+      COMMIT_OUTPUT="$(commit_and_push_review_fixes "$BRANCH" "$BASELINE_DIRTY" 2>&1)" || {
+        echo "$COMMIT_OUTPUT" >&2
+        write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$round" "$FIX_LOG" "Commit or push of PR gate fixes failed
+$COMMIT_OUTPUT" "$PR_URL" "$PR_GATE_STATUS" "$CI_RUNS_WATCHED" "$FAILED_PR_GATES" "$FIXES_PUSHED"
+        exit 1
+      }
+      if [ -n "$COMMIT_OUTPUT" ]; then
+        echo "$COMMIT_OUTPUT"
+      fi
+      FIXES_PUSHED=$((FIXES_PUSHED + 1))
+      continue
     fi
     if [ "$REVIEW_SIGNAL" = "BLOCKED" ]; then
-      write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$round" "$REVIEW_LOG" "Review did not reach mergeable verdict"
+      write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$round" "$REVIEW_LOG" "Review did not reach mergeable verdict" "$PR_URL" "$PR_GATE_STATUS" "$CI_RUNS_WATCHED" "$FAILED_PR_GATES" "$FIXES_PUSHED"
       echo "Ralph review blocked. Report: $REVIEW_REPORT_PATH"
       exit 1
     fi
   done
 
-  write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$REVIEW_MAX_ROUNDS" "$FINAL_LOG" "Review did not return a final signal"
+  write_review_report "BLOCKED" "$BRANCH" "$BASE_REF" "$BASE_SHA" "$(git_head)" "$REVIEW_MAX_ROUNDS" "$FINAL_LOG" "Review did not return a final signal" "$PR_URL" "$PR_GATE_STATUS" "$CI_RUNS_WATCHED" "$FAILED_PR_GATES" "$FIXES_PUSHED"
   echo "Ralph review blocked. Report: $REVIEW_REPORT_PATH"
   exit 1
 fi
@@ -1744,7 +2140,7 @@ if [ "$MODE" = "deploy" ]; then
 
   if [ "$DEPLOY_SKIP_REVIEW" != "1" ]; then
     set +e
-    "$0" review "$REVIEW_MAX_ROUNDS" --base "$DEPLOY_BASE_REF"
+    REVIEW_PR_GATE=0 "$0" review "$REVIEW_MAX_ROUNDS" --base "$DEPLOY_BASE_REF"
     REVIEW_STATUS=$?
     set -e
     if [ "$REVIEW_STATUS" -ne 0 ]; then
